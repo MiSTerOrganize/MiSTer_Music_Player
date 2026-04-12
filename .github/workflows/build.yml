@@ -1,0 +1,31 @@
+name: Build for MiSTer
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU for ARM
+        uses: docker/setup-qemu-action@v3
+
+      - name: Build in ARM Bullseye container
+        run: |
+          docker run --rm --platform linux/arm/v7 \
+            -v $(pwd):/work -w /work \
+            arm32v7/debian:bullseye-slim \
+            bash build_mister.sh
+
+      - name: Upload release
+        uses: actions/upload-artifact@v4
+        with:
+          name: MiSTer-Music-Player
+          path: release/
