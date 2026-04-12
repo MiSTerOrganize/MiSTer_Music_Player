@@ -12,6 +12,7 @@ CXX      = g++
 CC       = gcc
 CXXFLAGS = -mcpu=cortex-a9 -mtune=cortex-a9 -mfloat-abi=hard -mfpu=neon \
            -Ofast -I$(GME_DIR) -Igame-music-emu $(SDL_CFLAGS) \
+           -DBLARGG_LITTLE_ENDIAN=1 \
            -ffunction-sections -fdata-sections \
            -Wno-unused-result
 CFLAGS   = $(CXXFLAGS)
