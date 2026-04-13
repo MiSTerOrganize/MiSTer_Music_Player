@@ -2,7 +2,7 @@
 
 A retro game music jukebox for **MiSTer FPGA**, powered by [Game_Music_Emu](https://github.com/libgme/game-music-emu).
 
-Plays music rips from classic consoles and computers with a waveform oscilloscope display, file browser, and full controller support.
+Plays music rips from classic consoles and computers with native video output, waveform oscilloscope display, and full controller support. Uses a hybrid FPGA+ARM architecture — the FPGA handles native video output for CRT and HDMI, while the ARM CPU runs the sound chip emulation and renders the UI.
 
 ## Supported Formats
 
@@ -20,25 +20,18 @@ Plays music rips from classic consoles and computers with a waveform oscilloscop
 
 ## Installation
 
-### Option A — Automatic (Recommended)
-
-1. Copy `Scripts/Install_MiSTer-Music-Player.sh` to `/media/fat/Scripts/` on your MiSTer SD card
-2. On MiSTer: **F12 → Scripts → Install_MiSTer-Music-Player**
-3. The script downloads and installs everything automatically
-
-### Option B — Manual
-
 1. Download from [Releases](../../releases)
-2. Copy `MiSTer-Music-Player/` to `/media/fat/`
-3. Copy `Scripts/*.sh` to `/media/fat/Scripts/`
-4. Place your music files in `/media/fat/Music/`
+2. Copy `_Multimedia/Music_Player_*.rbf` to `/media/fat/_Multimedia/` on your MiSTer SD card
+3. Copy `games/Music_Player/` to `/media/fat/games/Music_Player/`
+4. Place your music files in `/media/fat/games/Music_Player/Music/`
+5. Select **Music Player** from the MiSTer main menu
 
-### Adding Music
+## Adding Music
 
-Place your music rip files in `/media/fat/Music/`. You can organize them into subfolders by system or game:
+Place your music rip files in `/media/fat/games/Music_Player/Music/`. You can organize them into subfolders by system or game:
 
 ```
-/media/fat/Music/
+/media/fat/games/Music_Player/Music/
 ├── NES/
 │   ├── Mega Man 2.nsf
 │   ├── Castlevania III.nsf
@@ -54,31 +47,27 @@ Place your music rip files in `/media/fat/Music/`. You can organize them into su
     └── Pokemon Red.gbs
 ```
 
-The file browser scans folders live — add or remove files anytime.
-
-### Running
-
-**F12 → Scripts → music_player**
+Music files are loaded through the MiSTer OSD menu (Guide button → Load Music).
 
 ## Controls
 
 | Controller | Action |
 |---|---|
-| D-pad Up/Down | Browse files |
+| D-pad Up/Down | Browse tracks |
 | D-pad Left/Right | Previous / Next track |
-| A | Select file / Pause / Resume |
-| B | Go back a folder |
+| A | Pause / Resume |
 | Start | Toggle loop mode |
 
 ## Features
 
+- Native video output (CRT-compatible, HDMI, scanlines, shadow masks)
 - Waveform oscilloscope display
-- File browser with directory navigation
+- OSD file browser for loading music files
 - Multi-track support (NSF, GBS, etc. files contain multiple songs)
 - Track info display (game, song, system, elapsed/total time)
 - Auto-advance to next track
 - Loop mode toggle
-- Full gamepad support with analog stick and d-pad
+- Full gamepad support
 
 ## Where to Get Music Files
 
@@ -92,15 +81,15 @@ The file browser scans folders live — add or remove files anytime.
 
 ```
 /media/fat/
-├── MiSTer-Music-Player/
-│   └── MiSTer-Music-Player   ← player binary
-├── Music/                     ← your music files
-│   ├── NES/
-│   ├── SNES/
-│   └── ...
-└── Scripts/
-    ├── music_player.sh                    ← launcher
-    └── Install_MiSTer-Music-Player.sh     ← installer
+├── _Multimedia/
+│   └── Music_Player_20260413.rbf   ← FPGA core
+└── games/
+    └── Music_Player/               ← setname folder (OSD file browser root)
+        ├── Music_Player            ← ARM binary
+        └── Music/                  ← your music files
+            ├── NES/
+            ├── SNES/
+            └── ...
 ```
 
 ## Credits
