@@ -154,4 +154,3 @@ README
 echo ""
 echo "=== Build Complete ==="
 ls -lh MiSTer-Music-Player 2>/dev/null
-file MiSTer-Music-Player 2>/dev/null
