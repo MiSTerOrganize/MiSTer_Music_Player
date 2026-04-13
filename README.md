@@ -122,5 +122,5 @@ Developers: see the source code and build scripts for build instructions and pro
 Thank you to all my [Patreon](https://www.patreon.com/MiSTer_Organize) supporters for making projects like this possible. If you enjoy MiSTer_Music_Player and want to support future MiSTer projects, consider joining:
 
 <a href="https://www.patreon.com/join/MiSTer_Organize">
-  <img src="https://img.shields.io/badge/Support_on_Patreon-F96854?style=for-the-badge&logo=patreon&logoColor=white" alt="Support on Patreon" width="300" height="60">
+  <img src="https://github.com/MiSTerOrganize/MiSTer_Music_Player/raw/main/assets/patreon_banner.png" alt="Support my work at Patreon" width="500">
 </a>
