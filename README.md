@@ -20,11 +20,10 @@ Plays music rips from classic consoles and computers with native video output, w
 
 ## Installation
 
-1. Download from [Releases](../../releases)
-2. Copy `_Multimedia/Music_Player_*.rbf` to `/media/fat/_Multimedia/` on your MiSTer SD card
-3. Copy `games/Music_Player/` to `/media/fat/games/Music_Player/`
-4. Place your music files in `/media/fat/games/Music_Player/Music/`
-5. Select **Music Player** from the MiSTer main menu
+1. Copy `_Multimedia/Music_Player_*.rbf` to `/media/fat/_Multimedia/` on your MiSTer SD card
+2. Copy `games/Music_Player/` to `/media/fat/games/Music_Player/`
+3. Place your music files in `/media/fat/games/Music_Player/Music/`
+4. Select **Music Player** from the MiSTer main menu
 
 ## Adding Music
 
