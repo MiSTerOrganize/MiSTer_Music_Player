@@ -119,7 +119,7 @@ Developers: see the source code and build scripts for build instructions and pro
 
 ## Support
 
-Thank you to all my [Patreon](https://www.patreon.com/MiSTer_Organize) supporters for making projects like this possible. If you enjoy MiSTer_Music_Player and want to support future MiSTer projects, consider joining:
+Thank you to all my Patreon supporters for making projects like this possible. If you enjoy MiSTer_Music_Player and want to support future MiSTer projects, consider joining:
 
 <p align="center">
   <a href="https://www.patreon.com/join/MiSTer_Organize">

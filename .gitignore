@@ -4,3 +4,19 @@ MiSTer-Music-Player
 release/
 game-music-emu/
 SDL-1.2.15/
+
+# Quartus build artifacts
+fpga/output_files/
+fpga/db/
+fpga/incremental_db/
+fpga/simulation/
+fpga/greybox_tmp/
+fpga/*.bak
+fpga/*.rpt
+fpga/*.done
+fpga/*.smsg
+fpga/*.summary
+fpga/*.jdi
+fpga/*.pin
+fpga/*.sld
+fpga/*.qws

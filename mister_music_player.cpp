@@ -89,13 +89,13 @@ static bool alsa_init(void) {
     }
     if (!alsa_lib) return false;
 
-    p_snd_pcm_open      = dlsym(alsa_lib, "snd_pcm_open");
-    p_snd_pcm_set_params = dlsym(alsa_lib, "snd_pcm_set_params");
-    p_snd_pcm_writei    = dlsym(alsa_lib, "snd_pcm_writei");
-    p_snd_pcm_recover   = dlsym(alsa_lib, "snd_pcm_recover");
-    p_snd_pcm_close     = dlsym(alsa_lib, "snd_pcm_close");
-    p_snd_pcm_prepare   = dlsym(alsa_lib, "snd_pcm_prepare");
-    p_snd_pcm_drop      = dlsym(alsa_lib, "snd_pcm_drop");
+    p_snd_pcm_open      = (decltype(p_snd_pcm_open))dlsym(alsa_lib, "snd_pcm_open");
+    p_snd_pcm_set_params = (decltype(p_snd_pcm_set_params))dlsym(alsa_lib, "snd_pcm_set_params");
+    p_snd_pcm_writei    = (decltype(p_snd_pcm_writei))dlsym(alsa_lib, "snd_pcm_writei");
+    p_snd_pcm_recover   = (decltype(p_snd_pcm_recover))dlsym(alsa_lib, "snd_pcm_recover");
+    p_snd_pcm_close     = (decltype(p_snd_pcm_close))dlsym(alsa_lib, "snd_pcm_close");
+    p_snd_pcm_prepare   = (decltype(p_snd_pcm_prepare))dlsym(alsa_lib, "snd_pcm_prepare");
+    p_snd_pcm_drop      = (decltype(p_snd_pcm_drop))dlsym(alsa_lib, "snd_pcm_drop");
 
     if (!p_snd_pcm_open || !p_snd_pcm_writei) return false;
 
