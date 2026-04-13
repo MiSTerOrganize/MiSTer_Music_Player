@@ -25,9 +25,9 @@ GME_SRC = $(wildcard $(GME_DIR)/*.cpp) $(GME_DIR)/ext/emu2413.c
 GME_OBJ = $(patsubst %.cpp,%.o,$(patsubst %.c,%.o,$(GME_SRC)))
 
 # ── Player ───────────────────────────────────────────────────────
-PLAYER_SRC = mister_music_player.cpp
+PLAYER_SRC = music_player.cpp
 PLAYER_OBJ = $(PLAYER_SRC:.cpp=.o)
-BIN = MiSTer-Music-Player
+BIN = Music_Player
 
 # ── Rules ────────────────────────────────────────────────────────
 all: $(BIN)

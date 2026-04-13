@@ -148,8 +148,7 @@ module emu
     inout   [3:0] ADC_BUS
 );
 
-// -- Accent accent accent accent accent accent accent accent accent accent
-// accent accent accent accent accent accent accent accent accent
+// -- Default assignments for unused ports --
 wire NATIVE_VID_ACTIVE;
 
 `ifdef MISTER_FB

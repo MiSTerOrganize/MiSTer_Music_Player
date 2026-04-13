@@ -27,5 +27,5 @@ jobs:
       - name: Upload release
         uses: actions/upload-artifact@v4
         with:
-          name: MiSTer-Music-Player
+          name: MiSTer_Music_Player
           path: release/

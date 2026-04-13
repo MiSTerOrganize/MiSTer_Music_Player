@@ -1,6 +1,6 @@
 *.o
 *.a
-MiSTer-Music-Player
+Music_Player
 release/
 game-music-emu/
 SDL-1.2.15/

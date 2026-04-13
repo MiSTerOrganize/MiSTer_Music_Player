@@ -5,19 +5,24 @@
  * GBS (Game Boy), HES (PC Engine), AY (Spectrum), SAP (Atari), KSS (MSX),
  * GYM (Genesis) via Blargg's Game_Music_Emu library.
  *
+ * Hybrid FPGA+ARM core — ARM binary for Music_Player core.
  * Built following MiSTer-FPGA-Build-Guide.md conventions:
- *   - SDL 1.2 fbcon video (320x240 RGB565)
+ *   - Video rendered to DDR3 for FPGA native output (320x240 RGB565)
  *   - ALSA audio via dlopen (blocking snd_pcm_writei, NO usleep)
  *   - DummyAudioCallback for SDL timer init
- *   - SDL state polling for d-pad + joystick hat + analog
+ *   - Joystick input via DDR3 (FPGA writes, ARM reads)
+ *   - Music files loaded via DDR3 (FPGA ioctl, ARM reads)
  *   - Audio thread pinned to core 1, main on core 0
- *   - vmode in launcher script
  *
- * Controls (gamepad):
- *   D-pad Up/Down  = Browse files / scroll track list
- *   D-pad Left/Right = Previous/Next track
- *   A (Enter)      = Select file / Play
- *   B (Escape)     = Back / Stop
+ * NOTE: Video rendering currently writes to an SDL surface (dummy driver).
+ * The DDR3 native video writer integration is the next step — it will
+ * write frames directly to DDR3 for FPGA output.
+ *
+ * Controls (gamepad via DDR3 joystick forwarding):
+ *   D-pad Up/Down     = Browse tracks
+ *   D-pad Left/Right  = Previous/Next track
+ *   A                 = Pause / Resume
+ *   Start             = Toggle loop mode
  *   X              = Pause/Resume
  *   Start          = Toggle loop mode
  *
@@ -310,7 +315,7 @@ static FileEntry files[MAX_FILES];
 static int file_count = 0;
 static int file_cursor = 0;
 static int file_scroll = 0;
-static char current_dir[512] = "/media/fat/Music";
+static char current_dir[512] = "/media/fat/games/Music_Player/Music";
 
 static bool has_music_ext(const char *name) {
     const char *ext = strrchr(name, '.');
@@ -557,9 +562,8 @@ int main(int argc, char *argv[]) {
     signal(SIGTERM, signal_handler);
     signal(SIGINT, signal_handler);
 
-    /* Set SDL environment for MiSTer fbcon */
-    setenv("SDL_VIDEODRIVER", "fbcon", 0);
-    setenv("SDL_FBDEV", "/dev/fb0", 0);
+    /* Set SDL to dummy video driver — hybrid core uses DDR3 native video, not fbcon */
+    setenv("SDL_VIDEODRIVER", "dummy", 1);
 
     /* Init SDL */
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_JOYSTICK) < 0) {
@@ -605,7 +609,7 @@ int main(int argc, char *argv[]) {
     }
 
     /* Determine music directory */
-    const char *music_dir = "/media/fat/Music";
+    const char *music_dir = "/media/fat/games/Music_Player/Music";
     if (argc > 1) {
         struct stat st;
         if (stat(argv[1], &st) == 0) {
@@ -613,7 +617,7 @@ int main(int argc, char *argv[]) {
                 music_dir = argv[1];
             else {
                 /* Direct file argument — load it */
-                music_dir = "/media/fat/Music";
+                music_dir = "/media/fat/games/Music_Player/Music";
                 load_file(argv[1]);
             }
         }
