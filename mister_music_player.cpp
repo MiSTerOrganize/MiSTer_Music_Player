@@ -37,7 +37,7 @@
 #include <sched.h>
 #include <time.h>
 
-#include <SDL/SDL.h>
+#include "SDL.h"
 #include "gme/gme.h"
 
 /* ── Display ─────────────────────────────────────────────────── */
@@ -623,7 +623,6 @@ int main(int argc, char *argv[]) {
     memset(scope_buf, 0, sizeof(scope_buf));
 
     /* ── Main loop ───────────────────────────────────────────── */
-    bool btn_block_b = (joy != NULL); /* Block B→Escape when gamepad connected */
     uint32_t last_input_time = 0;
     const uint32_t INPUT_REPEAT_MS = 200;
 
@@ -638,14 +637,21 @@ int main(int argc, char *argv[]) {
                 g_running = false;
                 break;
             case SDL_KEYDOWN:
-                if (ev.key.keysym.sym == SDLK_ESCAPE && !btn_block_b)
-                    g_running = false;
-                if (ev.key.keysym.sym == SDLK_x) {
-                    /* X = Pause */
-                    paused = !paused;
+                if (ev.key.keysym.sym == SDLK_ESCAPE) {
+                    /* B = Go back a folder in browser */
+                    if (strcmp(current_dir, "/") != 0) {
+                        char resolved[512];
+                        strncpy(resolved, current_dir, sizeof(resolved));
+                        char *last = strrchr(resolved, '/');
+                        if (last && last != resolved)
+                            *last = '\0';
+                        else
+                            strcpy(resolved, "/");
+                        scan_directory(resolved);
+                    }
                 }
                 if (ev.key.keysym.sym == SDLK_RETURN) {
-                    /* A = Select */
+                    /* A = Select file/folder in browser, OR Pause/Resume during playback */
                     if (file_count > 0) {
                         FileEntry *f = &files[file_cursor];
                         if (f->is_dir) {
@@ -665,14 +671,19 @@ int main(int argc, char *argv[]) {
                         } else {
                             load_file(f->path);
                         }
+                    } else if (emu) {
+                        /* No file selected but music playing — pause/resume */
+                        paused = !paused;
                     }
                 }
                 break;
             case SDL_JOYBUTTONDOWN:
-                if (ev.jbutton.button == 2) { /* X = Pause */
-                    paused = !paused;
+                if (ev.jbutton.button == 0) {
+                    /* A = Pause/Resume during playback (also handled via Enter above for select) */
+                    if (emu) paused = !paused;
                 }
-                if (ev.jbutton.button == 7) { /* Start = Toggle loop */
+                if (ev.jbutton.button == 7) {
+                    /* Start = Toggle loop */
                     looping = !looping;
                     if (emu) {
                         if (looping)
@@ -681,10 +692,8 @@ int main(int argc, char *argv[]) {
                             gme_set_fade_msecs(emu, track_info->length, 8000);
                     }
                 }
-                if (ev.jbutton.button == 6 || ev.jbutton.button == 8) {
-                    /* Back/Guide = Quit */
-                    g_running = false;
-                }
+                /* Button 6 (Back/Select) = DO NOTHING */
+                /* Button 8 (Guide) = DO NOTHING — MiSTer OSD handles Guide natively */
                 break;
             }
         }

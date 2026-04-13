@@ -102,11 +102,9 @@ if [ -f "$APP_DIR/MiSTer-Music-Player" ]; then
     echo "Controls:"
     echo "  D-pad Up/Down    = Browse files"
     echo "  D-pad Left/Right = Prev/Next track"
-    echo "  A (Enter)        = Select / Play"
-    echo "  B (Escape)       = Back"
-    echo "  X                = Pause/Resume"
+    echo "  A                = Select / Pause / Resume"
+    echo "  B                = Go back a folder"
     echo "  Start            = Toggle loop"
-    echo "  Back/Guide       = Quit"
 else
     echo "ERROR: Copy MiSTer-Music-Player/ folder to /media/fat/ first."
 fi
@@ -140,10 +138,9 @@ SETUP:
 CONTROLS:
   D-pad Up/Down    = Browse files
   D-pad Left/Right = Previous / Next track
-  A (Enter)        = Select file / Play
-  X                = Pause / Resume
+  A                = Select file / Pause / Resume
+  B                = Go back a folder
   Start            = Toggle loop mode
-  Back / Guide     = Quit
 
 WHERE TO GET MUSIC FILES:
   Zophar's Domain: https://www.zophar.net/music
@@ -151,7 +148,7 @@ WHERE TO GET MUSIC FILES:
   SNESMusic: https://www.snesmusic.org/
   HCS Forum: https://hcs64.com/
 
-Powered by Game_Music_Emu by Blargg (LGPL 2.1)
+Powered by Game_Music_Emu by Blargg (GPL-3.0)
 README
 
 echo ""
