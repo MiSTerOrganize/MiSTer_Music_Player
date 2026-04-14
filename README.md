@@ -112,21 +112,27 @@ Hybrid FPGA+ARM design. The FPGA handles all video and audio output. The ARM CPU
 
 All 27 RBFs share identical FPGA logic. Only the CONF_STR (core name and file extension filter) differs per RBF. One ARM binary handles all formats.
 
-## Implementation Phases
+## Libraries
 
-| Phase | Library | Formats | Status |
-|---|---|---|---|
-| 1 | Game_Music_Emu | NSF, SPC, VGM, VGZ, GBS, HES, AY, SAP, KSS, GYM | Built |
-| 2 | libsidplayfp | SID | Planned |
-| 3 | libopenmpt | MOD, S3M, XM, IT | Planned |
-| 4 | sc68 | SNDH, SC68 | Planned |
-| 5 | Highly Experimental | PSF, SSF | Planned |
-| 6 | lazyusf2 | USF | Planned |
-| 7 | lazygsf | GSF | Planned |
-| 8 | adplug | DRO, IMF, CMF | Planned |
-| 9 | libs98 | S98 | Planned |
-| 10 | mdxmini | MDX | Planned |
-| 11 | in_wsr | WSR | Planned |
+All 13 libraries are built and linked. Every format plays real audio.
+
+| # | Library | Repo | Formats | Status |
+|---|---|---|---|---|
+| 1 | Game_Music_Emu | [libgme/game-music-emu](https://github.com/libgme/game-music-emu) | NSF, SPC, VGM, VGZ, GBS, HES, AY, SAP, KSS, GYM | Built |
+| 2 | libsidplayfp | [libsidplayfp/libsidplayfp](https://github.com/libsidplayfp/libsidplayfp) | SID | Built |
+| 3 | libopenmpt | [OpenMPT/openmpt](https://github.com/OpenMPT/openmpt) | MOD, S3M, XM, IT | Built |
+| 4 | sc68 | [Zeinok/sc68](https://github.com/Zeinok/sc68) | SNDH, SC68 | Built |
+| 5 | psflib | [kode54/psflib](https://github.com/kode54/psflib) | PSF container parser | Built |
+| 6 | Highly Experimental | [kode54/Highly_Experimental](https://github.com/kode54/Highly_Experimental) | PSF (PlayStation SPU) | Built |
+| 7 | Highly Theoretical | [kode54/Highly_Theoretical](https://github.com/kode54/Highly_Theoretical) | SSF (Saturn SCSP) | Built |
+| 8 | lazyusf2 | [derselbst/lazyusf2](https://github.com/derselbst/lazyusf2) | USF (N64 RSP) | Built |
+| 9 | lazygsf | [jprjr/lazygsf](https://github.com/jprjr/lazygsf) | GSF (GBA sound) | Built |
+| 10 | adplug | [adplug/adplug](https://github.com/adplug/adplug) | DRO, IMF, CMF | Built |
+| 11 | libvgm | [ValleyBell/libvgm](https://github.com/ValleyBell/libvgm) | S98 (PC-98 YM2203/YM2608) | Built |
+| 12 | mdxmini | [mistydemeo/mdxmini](https://github.com/mistydemeo/mdxmini) | MDX (X68000 YM2151) | Built |
+| 13 | beetle-wswan | [libretro/beetle-wswan-libretro](https://github.com/libretro/beetle-wswan-libretro) | WSR (WonderSwan V30MZ) | Built |
+
+These are the same libraries used by foobar2000, Audacious, DroidSound-E, Audio Overload, VLC, and MPD.
 
 ## Where to Get Music Files
 
@@ -166,7 +172,19 @@ Requires Intel Quartus Prime (Lite edition, 17.0+).
 
 ## Credits
 
-- **[Game_Music_Emu](https://github.com/libgme/game-music-emu)** by Blargg — audio emulation
+- **[Game_Music_Emu](https://github.com/libgme/game-music-emu)** by Blargg — NSF, SPC, VGM, GBS, HES, AY, SAP, KSS, GYM
+- **[libsidplayfp](https://github.com/libsidplayfp/libsidplayfp)** — cycle-accurate C64 SID emulation (reSIDfp)
+- **[libopenmpt](https://github.com/OpenMPT/openmpt)** — MOD, S3M, XM, IT tracker playback
+- **[sc68](https://github.com/Zeinok/sc68)** by Benjamin Gerard — Atari ST YM2149 + 68000
+- **[psflib](https://github.com/kode54/psflib)** by kode54 — PSF container parser
+- **[Highly Experimental](https://github.com/kode54/Highly_Experimental)** by Neill Corlett / kode54 — PlayStation SPU
+- **[Highly Theoretical](https://github.com/kode54/Highly_Theoretical)** by kode54 — Saturn SCSP
+- **[lazyusf2](https://github.com/derselbst/lazyusf2)** — N64 RSP audio
+- **[lazygsf](https://github.com/jprjr/lazygsf)** by jprjr — GBA sound
+- **[adplug](https://github.com/adplug/adplug)** — AdLib OPL2/OPL3
+- **[libvgm](https://github.com/ValleyBell/libvgm)** by Valley Bell — S98 / VGM playback
+- **[mdxmini](https://github.com/mistydemeo/mdxmini)** — X68000 MDX (YM2151)
+- **[beetle-wswan](https://github.com/libretro/beetle-wswan-libretro)** — WonderSwan V30MZ emulation (Mednafen)
 - **MiSTer FPGA Project** by Sorgelig and community
 - MiSTer adaptation by **MiSTer Organize**
 
