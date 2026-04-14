@@ -200,13 +200,101 @@ assign LED_USER    = act_cnt[26] ? act_cnt[25:18] > act_cnt[7:0] : act_cnt[25:18
 assign LED_POWER[0] = 0;
 
 // -- CONF_STR --
-// Music file extensions: NSF, SPC, VGM, VGZ, GBS, HES, AY, SAP, KSS, GYM
-// Each extension is 3 chars, space-padded to 3 chars
-// Core name is "Music_Player" -- setname for games/ folder and OSD title
+// Parameterized per-system. Build with -DCORE_XXX to select variant.
+// All variants share identical FPGA logic; only CONF_STR differs.
+// Default (no define) = NES_Music_Player with NSF extensions.
 `include "build_id.v"
+
+// Setname must match the ARM binary folder: games/Music_Player/
+// The OSD title shows the system-specific name.
+
 localparam CONF_STR = {
-    "Music_Player;;",
-    "F0,NSFSPVGMVGZGBSHESAY SAPKSSGYM,Load Music;",
+`ifdef CORE_NES
+    "NES_Music_Player;;",
+    "F0,NSFNSFE,Load NSF;",
+`elsif CORE_SNES
+    "SNES_Music_Player;;",
+    "F0,SPC,Load SPC;",
+`elsif CORE_MEGADRIVE
+    "MegaDrive_Music_Player;;",
+    "F0,VGMVGZGYM,Load VGM;",
+`elsif CORE_SMS
+    "SMS_Music_Player;;",
+    "F0,VGMVGZ,Load VGM;",
+`elsif CORE_GAMEGEAR
+    "GameGear_Music_Player;;",
+    "F0,VGMVGZ,Load VGM;",
+`elsif CORE_S32X
+    "S32X_Music_Player;;",
+    "F0,VGMVGZ,Load VGM;",
+`elsif CORE_GAMEBOY
+    "Gameboy_Music_Player;;",
+    "F0,GBS,Load GBS;",
+`elsif CORE_TURBOGRAFX16
+    "TurboGrafx16_Music_Player;;",
+    "F0,HES,Load HES;",
+`elsif CORE_COLECOVISION
+    "ColecoVision_Music_Player;;",
+    "F0,VGMVGZ,Load VGM;",
+`elsif CORE_SG1000
+    "SG-1000_Music_Player;;",
+    "F0,VGMVGZ,Load VGM;",
+`elsif CORE_VECTREX
+    "Vectrex_Music_Player;;",
+    "F0,AY ,Load AY;",
+`elsif CORE_PSX
+    "PSX_Music_Player;;",
+    "F0,PSFMINIPSF,Load PSF;",
+`elsif CORE_SATURN
+    "Saturn_Music_Player;;",
+    "F0,SSF,Load SSF;",
+`elsif CORE_N64
+    "N64_Music_Player;;",
+    "F0,USFMINIUSF,Load USF;",
+`elsif CORE_GBA
+    "GBA_Music_Player;;",
+    "F0,GSFMINIGSF,Load GSF;",
+`elsif CORE_WONDERSWAN
+    "WonderSwan_Music_Player;;",
+    "F0,WSR,Load WSR;",
+`elsif CORE_C64
+    "C64_Music_Player;;",
+    "F0,SID,Load SID;",
+`elsif CORE_AMIGA
+    "Amiga_Music_Player;;",
+    "F0,MODS3MXM IT MPTM,Load Module;",
+`elsif CORE_ATARIST
+    "AtariST_Music_Player;;",
+    "F0,SNDHSC68,Load SNDH;",
+`elsif CORE_ATARI800
+    "Atari800_Music_Player;;",
+    "F0,SAP,Load SAP;",
+`elsif CORE_ZXSPECTRUM
+    "ZX-Spectrum_Music_Player;;",
+    "F0,AY ,Load AY;",
+`elsif CORE_AMSTRAD
+    "Amstrad_Music_Player;;",
+    "F0,AY ,Load AY;",
+`elsif CORE_MSX
+    "MSX_Music_Player;;",
+    "F0,KSS,Load KSS;",
+`elsif CORE_BBCMICRO
+    "BBCMicro_Music_Player;;",
+    "F0,VGMVGZ,Load VGM;",
+`elsif CORE_AO486
+    "ao486_Music_Player;;",
+    "F0,DROIMFCMF,Load AdLib;",
+`elsif CORE_PC98
+    "PC-98_Music_Player;;",
+    "F0,S98,Load S98;",
+`elsif CORE_X68000
+    "X68000_Music_Player;;",
+    "F0,MDX,Load MDX;",
+`else
+    // Default: NES
+    "NES_Music_Player;;",
+    "F0,NSFNSFE,Load NSF;",
+`endif
     "-;",
     "J1,Play-Pause,Loop;",
     "jn,A,Start;",
@@ -292,17 +380,18 @@ assign DDRAM_WE       = nv_ddr_we;
 wire use_nv = NATIVE_VID;
 
 ////////////////////////////  AUDIO  //////////////////////////////////
-// Audio comes from ARM via ALSA -- FPGA passes through silence
-// (ARM handles all audio output directly)
-assign AUDIO_L = 16'd0;
-assign AUDIO_R = 16'd0;
-assign AUDIO_S = 1;
+// Audio comes from ARM via DDR3 ring buffer -> FPGA audio output.
+// Same path as NES, SNES, Genesis: AUDIO_L/R -> I2S + SPDIF + DAC.
+wire [15:0] nv_audio_l, nv_audio_r;
+assign AUDIO_L = nv_audio_l;
+assign AUDIO_R = nv_audio_r;
+assign AUDIO_S = 1;  // signed (same as SNES, Genesis, Game Boy)
 
 assign USER_OUT[0]   = 1;
 assign USER_OUT[1]   = 1;
 assign USER_OUT[6:2] = '1;
 
-// --- Native video module ---
+// --- Native video + audio module ---
 wire [7:0] nv_r, nv_g, nv_b;
 wire       nv_hs, nv_vs, nv_de;
 wire       nv_active;
@@ -311,6 +400,7 @@ mp_video_top native_video
 (
     .clk_sys        (clk_sys),
     .clk_vid        (CLK_VIDEO),
+    .clk_audio      (CLK_AUDIO),
     .ce_pix         (ce_pix_div4),
     .reset          (RESET),
 
@@ -333,6 +423,10 @@ mp_video_top native_video
     .vga_vs         (nv_vs),
     .vga_de         (nv_de),
 
+    // Audio output
+    .audio_l        (nv_audio_l),
+    .audio_r        (nv_audio_r),
+
     // Control
     .enable         (use_nv),
     .active         (nv_active),
@@ -347,7 +441,10 @@ mp_video_top native_video
     .ioctl_wr       (ioctl_wr),
     .ioctl_addr     (ioctl_addr),
     .ioctl_dout     (ioctl_dout),
-    .ioctl_wait     (nv_ioctl_wait)
+    .ioctl_wait     (nv_ioctl_wait),
+
+    // Audio enable (always on for now — ARM sets flag when ready)
+    .audio_enable   (1'b1)
 );
 
 // Mux VGA outputs

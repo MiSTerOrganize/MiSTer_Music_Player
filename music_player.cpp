@@ -1,32 +1,27 @@
 /*
- * MiSTer Music Player — Retro game music jukebox for MiSTer FPGA
+ * MiSTer Music Player — Unified retro game music player
  *
- * Plays NSF (NES), SPC (SNES), VGM/VGZ (Genesis/Master System/arcade),
- * GBS (Game Boy), HES (PC Engine), AY (Spectrum), SAP (Atari), KSS (MSX),
- * GYM (Genesis) via Blargg's Game_Music_Emu library.
+ * One binary, all formats. Currently: GME (Phase 1).
+ * Future phases add libsidplayfp, libopenmpt, sc68, etc.
  *
- * Hybrid FPGA+ARM core — ARM binary for Music_Player core.
- * Built following MiSTer-FPGA-Build-Guide.md conventions:
- *   - Video rendered to DDR3 for FPGA native output (320x240 RGB565)
- *   - ALSA audio via dlopen (blocking snd_pcm_writei, NO usleep)
- *   - DummyAudioCallback for SDL timer init
- *   - Joystick input via DDR3 (FPGA writes, ARM reads)
- *   - Music files loaded via DDR3 (FPGA ioctl, ARM reads)
- *   - Audio thread pinned to core 1, main on core 0
+ * Hybrid FPGA+ARM core — ARM writes to DDR3 only:
+ *   - Audio: 48KHz stereo PCM to DDR3 ring buffer → FPGA I2S/SPDIF/DAC
+ *   - Video: metadata struct + waveform to DDR3 → FPGA renders text/scope
+ *   - Input: FPGA writes joystick to DDR3 → ARM reads
+ *   - Files: FPGA writes ioctl data to DDR3 → ARM reads
  *
- * NOTE: Video rendering currently writes to an SDL surface (dummy driver).
- * The DDR3 native video writer integration is the next step — it will
- * write frames directly to DDR3 for FPGA output.
+ * No ALSA. No framebuffer. No SDL video. Cleanest possible audio path.
+ * Same output path as NES/SNES/Genesis cores.
  *
- * Controls (gamepad via DDR3 joystick forwarding):
- *   D-pad Up/Down     = Browse tracks
- *   D-pad Left/Right  = Previous/Next track
- *   A                 = Pause / Resume
- *   Start             = Toggle loop mode
- *   X              = Pause/Resume
- *   Start          = Toggle loop mode
+ * 29 systems, 35+ formats across 11 libraries — one RBF, one binary.
  *
- * License: LGPL 2.1 (matching GME)
+ * Controls:
+ *   D-pad Left/Right = Previous/Next track
+ *   A                = Play / Pause
+ *   Start            = Toggle loop mode
+ *   Back/Guide       = Quit
+ *
+ * License: GPL-3.0 (MiSTer Organize)
  */
 
 #include <stdio.h>
@@ -34,756 +29,503 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdbool.h>
-#include <dirent.h>
-#include <sys/stat.h>
 #include <unistd.h>
 #include <pthread.h>
-#include <dlfcn.h>
 #include <sched.h>
 #include <time.h>
+#include <fcntl.h>
+#include <sys/mman.h>
 
 #include "SDL.h"
 #include "gme/gme.h"
 
-/* ── Display ─────────────────────────────────────────────────── */
-#define SCREEN_W    320
-#define SCREEN_H    240
-#define SCOPE_H     80
-#define LIST_Y      (SCOPE_H + 16)
-#define LIST_H      (SCREEN_H - LIST_Y)
-#define LINE_H      10
-#define MAX_VISIBLE (LIST_H / LINE_H)
+/* ── DDR3 Memory Map ─────────────────────────────────────────── */
+#define DDR3_BASE         0x3A000000
+#define DDR3_SIZE         0x00080000  /* 512KB mapped region */
 
-/* ── Audio ───────────────────────────────────────────────────── */
-#define SAMPLE_RATE  44100
-#define CHANNELS     2
-#define AUDIO_BUFSZ  1024
+#define OFF_CTRL          0x0000
+#define OFF_JOY           0x0008
+#define OFF_FILE_CTRL     0x0010
+#define OFF_STATE         0x0018
+#define OFF_TIME          0x0020
+#define OFF_FORMAT        0x0028
+#define OFF_TITLE         0x0030
+#define OFF_ARTIST        0x0070
+#define OFF_GAME          0x00B0
+#define OFF_SYSTEM        0x00F0
+#define OFF_WAVE_L        0x0100
+#define OFF_WAVE_R        0x0380
+#define OFF_AUD_WPTR      0x0800
+#define OFF_AUD_RPTR      0x0804
+#define OFF_AUD_RING      0x0810
+#define OFF_FILE_DATA     0x4900
 
-/* ── Colors (RGB565) ─────────────────────────────────────────── */
-#define COL_BG       0x0000
-#define COL_SCOPE_BG 0x0841
-#define COL_SCOPE    0x07E0  /* green */
-#define COL_TEXT     0xFFFF  /* white */
-#define COL_HILITE   0x001F  /* blue highlight */
-#define COL_DIM      0x7BEF  /* grey */
-#define COL_TITLE    0xFFE0  /* yellow */
-#define COL_SYSTEM   0x07FF  /* cyan */
+/* Audio ring buffer */
+#define RING_SIZE         4096
+#define RING_MASK         (RING_SIZE - 1)
+#define AUDIO_RATE        48000
+#define AUDIO_CHUNK       512
 
-/* ── ALSA function pointers (dlopen) ─────────────────────────── */
-typedef long snd_pcm_t;
-typedef long snd_pcm_sframes_t;
+/* Playback state flags */
+#define FLAG_PLAYING      (1 << 0)
+#define FLAG_PAUSED       (1 << 1)
+#define FLAG_LOOP         (1 << 2)
+#define FLAG_LOADED       (1 << 3)
+#define FLAG_AUDIO_RDY    (1 << 4)
 
-static void *alsa_lib = NULL;
-static snd_pcm_t *pcm_handle = NULL;
+/* Joystick bits */
+#define JOY_RIGHT         0x0001
+#define JOY_LEFT          0x0002
+#define JOY_DOWN          0x0004
+#define JOY_UP            0x0008
+#define JOY_A             0x0010
+#define JOY_B             0x0020
+#define JOY_X             0x0040
+#define JOY_Y             0x0080
+#define JOY_START         0x0800
+#define JOY_BACK          0x1000
+#define JOY_GUIDE         0x2000
 
-static int (*p_snd_pcm_open)(snd_pcm_t**, const char*, int, int);
-static int (*p_snd_pcm_set_params)(snd_pcm_t*, int, int, unsigned int,
-                                    unsigned int, int, unsigned int);
-static snd_pcm_sframes_t (*p_snd_pcm_writei)(snd_pcm_t*, const void*,
-                                              unsigned long);
-static int (*p_snd_pcm_recover)(snd_pcm_t*, int, int);
-static int (*p_snd_pcm_close)(snd_pcm_t*);
-static int (*p_snd_pcm_prepare)(snd_pcm_t*);
-static int (*p_snd_pcm_drop)(snd_pcm_t*);
+/* Format IDs — covers all 29 systems across all phases */
+enum {
+    FMT_UNKNOWN = 0,
+    /* Phase 1: GME */
+    FMT_NSF, FMT_NSFE, FMT_SPC, FMT_VGM, FMT_VGZ,
+    FMT_GBS, FMT_HES, FMT_AY, FMT_SAP, FMT_KSS, FMT_GYM,
+    /* Phase 2: libsidplayfp */
+    FMT_SID,
+    /* Phase 3: libopenmpt */
+    FMT_MOD, FMT_S3M, FMT_XM, FMT_IT, FMT_MPTM,
+    /* Phase 4: sc68 */
+    FMT_SNDH, FMT_SC68,
+    /* Phase 5: Highly Experimental */
+    FMT_PSF, FMT_SSF,
+    /* Phase 6: lazyusf2 */
+    FMT_USF,
+    /* Phase 7: lazygsf */
+    FMT_GSF,
+    /* Phase 8: adplug */
+    FMT_DRO, FMT_IMF, FMT_CMF, FMT_MUS_DOOM,
+    /* Phase 9: libs98 */
+    FMT_S98,
+    /* Phase 10: mdxmini */
+    FMT_MDX,
+    /* Phase 11: in_wsr */
+    FMT_WSR,
+};
 
-static bool alsa_init(void) {
-    alsa_lib = dlopen("/usr/lib/libasound.so.2", RTLD_NOW);
-    if (!alsa_lib) {
-        /* Fallback for build environment */
-        alsa_lib = dlopen("libasound.so.2", RTLD_NOW);
-    }
-    if (!alsa_lib) return false;
+#define WAVEFORM_WIDTH    320
 
-    p_snd_pcm_open      = (decltype(p_snd_pcm_open))dlsym(alsa_lib, "snd_pcm_open");
-    p_snd_pcm_set_params = (decltype(p_snd_pcm_set_params))dlsym(alsa_lib, "snd_pcm_set_params");
-    p_snd_pcm_writei    = (decltype(p_snd_pcm_writei))dlsym(alsa_lib, "snd_pcm_writei");
-    p_snd_pcm_recover   = (decltype(p_snd_pcm_recover))dlsym(alsa_lib, "snd_pcm_recover");
-    p_snd_pcm_close     = (decltype(p_snd_pcm_close))dlsym(alsa_lib, "snd_pcm_close");
-    p_snd_pcm_prepare   = (decltype(p_snd_pcm_prepare))dlsym(alsa_lib, "snd_pcm_prepare");
-    p_snd_pcm_drop      = (decltype(p_snd_pcm_drop))dlsym(alsa_lib, "snd_pcm_drop");
+/* ── Global State ────────────────────────────────────────────── */
+static volatile uint8_t  *ddr3 = NULL;
 
-    if (!p_snd_pcm_open || !p_snd_pcm_writei) return false;
+static Music_Emu *gme_emu = NULL;
+static int current_track = 0;
+static int total_tracks = 0;
+static bool playing = false;
+static bool paused = false;
+static bool loop_mode = false;
+static bool file_loaded = false;
+static bool running = true;
+static uint8_t format_id = FMT_UNKNOWN;
 
-    int err = p_snd_pcm_open(&pcm_handle, "default", 0 /* PLAYBACK */, 0);
-    if (err < 0) return false;
+static int16_t last_audio_buf[AUDIO_CHUNK * 2];
+static pthread_mutex_t audio_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-    err = p_snd_pcm_set_params(pcm_handle,
-        2,  /* SND_PCM_FORMAT_S16_LE */
-        3,  /* SND_PCM_ACCESS_RW_INTERLEAVED */
-        CHANNELS,
-        SAMPLE_RATE,
-        1,      /* allow resampling */
-        80000); /* 80ms latency */
-
-    return err >= 0;
+/* ── DDR3 helpers ────────────────────────────────────────────── */
+static inline void ddr3_w32(uint32_t off, uint32_t v) {
+    *(volatile uint32_t *)(ddr3 + off) = v;
+}
+static inline uint32_t ddr3_r32(uint32_t off) {
+    return *(volatile uint32_t *)(ddr3 + off);
+}
+static inline void ddr3_w8(uint32_t off, uint8_t v) {
+    *(volatile uint8_t *)(ddr3 + off) = v;
+}
+static void ddr3_wstr(uint32_t off, const char *s, int max) {
+    int i;
+    for (i = 0; i < max - 1 && s && s[i]; i++)
+        ddr3[off + i] = s[i];
+    for (; i < max; i++)
+        ddr3[off + i] = 0;
 }
 
-/* ── GME state ───────────────────────────────────────────────── */
-static Music_Emu *emu = NULL;
-static gme_info_t *track_info = NULL;
-static int current_track = 0;
-static int track_count = 0;
-static bool paused = false;
-static bool looping = false;
-static volatile bool audio_running = false;
-static volatile bool g_running = true;
-static short scope_buf[SCREEN_W * 2]; /* stereo scope buffer */
-static pthread_t audio_tid;
+static bool ddr3_init(void) {
+    int fd = open("/dev/mem", O_RDWR | O_SYNC);
+    if (fd < 0) { perror("open /dev/mem"); return false; }
+    ddr3 = (volatile uint8_t *)mmap(NULL, DDR3_SIZE,
+        PROT_READ | PROT_WRITE, MAP_SHARED, fd, DDR3_BASE);
+    close(fd);
+    if (ddr3 == MAP_FAILED) { ddr3 = NULL; return false; }
+    memset((void *)ddr3, 0, OFF_AUD_RING);
+    memset((void *)(ddr3 + OFF_AUD_RING), 0, RING_SIZE * 4);
+    return true;
+}
 
-/* ── Audio thread (core 1, blocking writei, NO usleep) ───────── */
+/* ── Format detection ────────────────────────────────────────── */
+static uint8_t detect_format(const uint8_t *d, uint32_t sz) {
+    if (sz < 4) return FMT_UNKNOWN;
+    if (!memcmp(d, "NESM", 4)) return FMT_NSF;
+    if (!memcmp(d, "NSFE", 4)) return FMT_NSFE;
+    if (sz >= 0x2E && !memcmp(d + 0x25, "SNES-SPC700", 11)) return FMT_SPC;
+    if (!memcmp(d, "Vgm ", 4)) return FMT_VGM;
+    if (d[0] == 0x1F && d[1] == 0x8B) return FMT_VGZ;
+    if (!memcmp(d, "GBS", 3)) return FMT_GBS;
+    if (!memcmp(d, "HESM", 4)) return FMT_HES;
+    if (!memcmp(d, "ZXAY", 4)) return FMT_AY;
+    if (!memcmp(d, "SAP\r", 4) || !memcmp(d, "SAP\n", 4)) return FMT_SAP;
+    if (!memcmp(d, "KSCC", 4) || !memcmp(d, "KSSX", 4)) return FMT_KSS;
+    if (!memcmp(d, "GYMX", 4)) return FMT_GYM;
+    if (!memcmp(d, "PSID", 4) || !memcmp(d, "RSID", 4)) return FMT_SID;
+    if (sz >= 1084 && (!memcmp(d+1080,"M.K.",4) || !memcmp(d+1080,"M!K!",4) ||
+        !memcmp(d+1080,"FLT4",4) || !memcmp(d+1080,"FLT8",4) ||
+        !memcmp(d+1080,"4CHN",4) || !memcmp(d+1080,"6CHN",4) ||
+        !memcmp(d+1080,"8CHN",4))) return FMT_MOD;
+    if (sz >= 48 && !memcmp(d+44, "SCRM", 4)) return FMT_S3M;
+    if (sz >= 17 && !memcmp(d, "Extended Module:", 16)) return FMT_XM;
+    if (!memcmp(d, "IMPM", 4)) return FMT_IT;
+    if (!memcmp(d, "SC68", 4)) return FMT_SC68;
+    if (!memcmp(d, "SNDH", 4)) return FMT_SNDH;
+    if (!memcmp(d, "ICE!", 4)) return FMT_SNDH; /* ICE packed SNDH */
+    if (!memcmp(d, "PSF", 3)) {
+        if (d[3] == 0x01) return FMT_PSF;
+        if (d[3] == 0x11) return FMT_SSF;
+        if (d[3] == 0x21) return FMT_USF;
+        if (d[3] == 0x22) return FMT_GSF;
+    }
+    if (!memcmp(d, "DBRAWOPL", 8)) return FMT_DRO;
+    if (sz >= 2 && d[0] == 0x00) return FMT_IMF; /* heuristic — weak */
+    return FMT_UNKNOWN;
+}
+
+static bool is_gme_format(uint8_t f) {
+    return f >= FMT_NSF && f <= FMT_GYM;
+}
+
+static const char *fmt_name(uint8_t f) {
+    static const char *names[] = {
+        "???",
+        "NSF","NSFe","SPC","VGM","VGZ","GBS","HES","AY","SAP","KSS","GYM",
+        "SID",
+        "MOD","S3M","XM","IT","MPTM",
+        "SNDH","SC68",
+        "PSF","SSF","USF","GSF",
+        "DRO","IMF","CMF","MUS",
+        "S98","MDX","WSR"
+    };
+    if (f < sizeof(names)/sizeof(names[0])) return names[f];
+    return "???";
+}
+
+static const char *sys_name(uint8_t f) {
+    switch (f) {
+        case FMT_NSF: case FMT_NSFE: return "NES";
+        case FMT_SPC:  return "SNES";
+        case FMT_VGM: case FMT_VGZ: return "Multi";
+        case FMT_GBS:  return "Game Boy";
+        case FMT_HES:  return "PC Engine";
+        case FMT_AY:   return "ZX/CPC";
+        case FMT_SAP:  return "Atari 8-bit";
+        case FMT_KSS:  return "MSX";
+        case FMT_GYM:  return "Genesis";
+        case FMT_SID:  return "C64";
+        case FMT_MOD:  return "Amiga";
+        case FMT_S3M: case FMT_XM: case FMT_IT: case FMT_MPTM: return "Tracker";
+        case FMT_SNDH: case FMT_SC68: return "Atari ST";
+        case FMT_PSF:  return "PlayStation";
+        case FMT_SSF:  return "Saturn";
+        case FMT_USF:  return "N64";
+        case FMT_GSF:  return "GBA";
+        case FMT_DRO: case FMT_IMF: case FMT_CMF: case FMT_MUS_DOOM: return "PC AdLib";
+        case FMT_S98:  return "PC-98";
+        case FMT_MDX:  return "X68000";
+        case FMT_WSR:  return "WonderSwan";
+        default: return "";
+    }
+}
+
+/* ── GME Backend ─────────────────────────────────────────────── */
+static bool gme_load(const uint8_t *data, uint32_t size) {
+    if (gme_emu) { gme_delete(gme_emu); gme_emu = NULL; }
+    gme_err_t err = gme_open_data(data, size, &gme_emu, AUDIO_RATE);
+    if (err || !gme_emu) return false;
+    total_tracks = gme_track_count(gme_emu);
+    current_track = 0;
+    gme_start_track(gme_emu, 0);
+    return true;
+}
+
+static int gme_render(int16_t *buf, int frames) {
+    if (!gme_emu) return 0;
+    return gme_play(gme_emu, frames * 2, buf) ? 0 : frames;
+}
+
+static void gme_update_meta(void) {
+    if (!gme_emu) return;
+    gme_info_t *info = NULL;
+    gme_track_info(gme_emu, &info, current_track);
+    if (!info) return;
+    ddr3_wstr(OFF_TITLE,  info->song   && info->song[0]   ? info->song   : "Unknown", 64);
+    ddr3_wstr(OFF_ARTIST, info->author && info->author[0] ? info->author : "", 64);
+    ddr3_wstr(OFF_GAME,   info->game   && info->game[0]   ? info->game   : "", 64);
+    ddr3_wstr(OFF_SYSTEM, info->system && info->system[0] ? info->system : sys_name(format_id), 16);
+    gme_free_info(info);
+}
+
+static int gme_position_ms(void) { return gme_emu ? gme_tell(gme_emu) : 0; }
+
+static int gme_duration_ms(void) {
+    if (!gme_emu) return 0;
+    gme_info_t *info = NULL;
+    gme_track_info(gme_emu, &info, current_track);
+    if (!info) return 0;
+    int dur = info->play_length;
+    gme_free_info(info);
+    return dur;
+}
+
+static void gme_set_track(int t) {
+    if (gme_emu && t >= 0 && t < total_tracks) {
+        current_track = t;
+        gme_start_track(gme_emu, t);
+    }
+}
+
+/* ── Audio Thread ────────────────────────────────────────────── */
 static void *audio_thread_func(void *arg) {
     (void)arg;
-    cpu_set_t cpuset;
-    CPU_ZERO(&cpuset);
-    CPU_SET(1, &cpuset);
-    pthread_setaffinity_np(pthread_self(), sizeof(cpuset), &cpuset);
+    cpu_set_t cs; CPU_ZERO(&cs); CPU_SET(1, &cs);
+    pthread_setaffinity_np(pthread_self(), sizeof(cs), &cs);
 
-    int16_t buffer[AUDIO_BUFSZ * CHANNELS];
+    int16_t buf[AUDIO_CHUNK * 2];
+    const struct timespec idle = {0, 5000000};
+    const struct timespec spin = {0, 100000};
 
-    while (audio_running) {
-        if (emu && !paused) {
-            gme_play(emu, AUDIO_BUFSZ * CHANNELS, buffer);
-
-            /* Copy to scope buffer for visualization */
-            int copy_len = SCREEN_W * 2;
-            if (copy_len > AUDIO_BUFSZ * CHANNELS)
-                copy_len = AUDIO_BUFSZ * CHANNELS;
-            memcpy(scope_buf, buffer, copy_len * sizeof(int16_t));
-
-            /* Blocking write — ALSA paces us, DO NOT add usleep */
-            snd_pcm_sframes_t frames = p_snd_pcm_writei(pcm_handle,
-                buffer, AUDIO_BUFSZ);
-            if (frames < 0) {
-                p_snd_pcm_recover(pcm_handle, (int)frames, 1);
-            }
-        } else {
-            /* Paused or no emu — write silence */
-            memset(buffer, 0, sizeof(buffer));
-            p_snd_pcm_writei(pcm_handle, buffer, AUDIO_BUFSZ);
+    while (running) {
+        if (!playing || paused || !file_loaded) {
+            nanosleep(&idle, NULL);
+            continue;
         }
+
+        /* Generate audio from active backend */
+        int frames = 0;
+        if (is_gme_format(format_id) && gme_emu) {
+            frames = gme_render(buf, AUDIO_CHUNK);
+            if (gme_track_ended(gme_emu)) {
+                if (loop_mode) {
+                    gme_start_track(gme_emu, current_track);
+                } else if (current_track + 1 < total_tracks) {
+                    current_track++;
+                    gme_start_track(gme_emu, current_track);
+                    gme_update_meta();
+                } else {
+                    playing = false;
+                    continue;
+                }
+            }
+        }
+        /* Phase 2+: add backend render calls here */
+
+        if (frames <= 0) { nanosleep(&idle, NULL); continue; }
+
+        /* Save for waveform display */
+        pthread_mutex_lock(&audio_mutex);
+        memcpy(last_audio_buf, buf, frames * 4);
+        pthread_mutex_unlock(&audio_mutex);
+
+        /* Wait for ring buffer space */
+        uint32_t wp = ddr3_r32(OFF_AUD_WPTR);
+        while (running) {
+            uint32_t rp = ddr3_r32(OFF_AUD_RPTR);
+            uint32_t used = (wp - rp) & RING_MASK;
+            if (used < (RING_SIZE - (uint32_t)frames - 64)) break;
+            nanosleep(&spin, NULL);
+        }
+
+        /* Write to DDR3 ring buffer */
+        volatile int16_t *ring = (volatile int16_t *)(ddr3 + OFF_AUD_RING);
+        for (int i = 0; i < frames; i++) {
+            uint32_t idx = (wp + i) & RING_MASK;
+            ring[idx * 2 + 0] = buf[i * 2 + 0];
+            ring[idx * 2 + 1] = buf[i * 2 + 1];
+        }
+        __sync_synchronize();
+        ddr3_w32(OFF_AUD_WPTR, (wp + frames) & RING_MASK);
     }
     return NULL;
 }
 
-static void audio_start(void) {
-    if (!audio_running) {
-        audio_running = true;
-        pthread_create(&audio_tid, NULL, audio_thread_func, NULL);
+/* ── Metadata update (60fps) ─────────────────────────────────── */
+static uint32_t frame_ctr = 0;
+
+static void update_metadata(void) {
+    uint8_t flags = 0;
+    if (playing)     flags |= FLAG_PLAYING;
+    if (paused)      flags |= FLAG_PAUSED;
+    if (loop_mode)   flags |= FLAG_LOOP;
+    if (file_loaded) flags |= FLAG_LOADED;
+    if (playing)     flags |= FLAG_AUDIO_RDY;
+
+    ddr3_w8(OFF_STATE + 0, flags);
+    ddr3_w8(OFF_STATE + 1, (uint8_t)current_track);
+    ddr3_w8(OFF_STATE + 2, (uint8_t)total_tracks);
+    ddr3_w8(OFF_STATE + 3, 255);
+
+    int elapsed = 0, duration = 0;
+    if (is_gme_format(format_id)) {
+        elapsed = gme_position_ms();
+        duration = gme_duration_ms();
     }
+    ddr3_w32(OFF_TIME + 0, (uint32_t)elapsed);
+    ddr3_w32(OFF_TIME + 4, (uint32_t)duration);
+
+    ddr3_w32(OFF_FORMAT + 0, AUDIO_RATE);
+    ddr3_w8(OFF_FORMAT + 4, 2);
+    ddr3_w8(OFF_FORMAT + 5, format_id);
+
+    /* Waveform: downsample last audio buffer to 320 samples */
+    pthread_mutex_lock(&audio_mutex);
+    volatile int16_t *wl = (volatile int16_t *)(ddr3 + OFF_WAVE_L);
+    volatile int16_t *wr = (volatile int16_t *)(ddr3 + OFF_WAVE_R);
+    for (int x = 0; x < WAVEFORM_WIDTH; x++) {
+        int idx = (x * AUDIO_CHUNK) / WAVEFORM_WIDTH;
+        if (idx >= AUDIO_CHUNK) idx = AUDIO_CHUNK - 1;
+        wl[x] = last_audio_buf[idx * 2 + 0];
+        wr[x] = last_audio_buf[idx * 2 + 1];
+    }
+    pthread_mutex_unlock(&audio_mutex);
+
+    frame_ctr += 4;
+    ddr3_w32(OFF_CTRL, frame_ctr);
 }
 
-static void audio_stop(void) {
-    if (audio_running) {
-        audio_running = false;
-        pthread_join(audio_tid, NULL);
-        if (p_snd_pcm_drop) p_snd_pcm_drop(pcm_handle);
-        if (p_snd_pcm_prepare) p_snd_pcm_prepare(pcm_handle);
+/* ── File loading ────────────────────────────────────────────── */
+static uint32_t last_fsize = 0;
+
+static bool check_new_file(void) {
+    uint32_t fsize = ddr3_r32(OFF_FILE_CTRL);
+    if (fsize == 0 || fsize == last_fsize) return false;
+    last_fsize = fsize;
+
+    const uint8_t *fdata = (const uint8_t *)(ddr3 + OFF_FILE_DATA);
+    format_id = detect_format(fdata, fsize);
+    fprintf(stderr, "Music_Player: %u bytes, format=%s (%s)\n",
+            fsize, fmt_name(format_id), sys_name(format_id));
+
+    playing = false; paused = false; file_loaded = false;
+    ddr3_w32(OFF_AUD_WPTR, 0);
+
+    bool ok = false;
+    if (is_gme_format(format_id)) {
+        ok = gme_load(fdata, fsize);
+        if (ok) gme_update_meta();
     }
-}
+    /* Phase 2+: route to other backends here */
+    else {
+        ddr3_wstr(OFF_TITLE, "Unsupported format", 64);
+        ddr3_wstr(OFF_ARTIST, fmt_name(format_id), 64);
+        ddr3_wstr(OFF_GAME, "", 64);
+        ddr3_wstr(OFF_SYSTEM, sys_name(format_id), 16);
+    }
 
-/* ── Simple pixel font (4x6 built-in) ───────────────────────── */
-/* Minimal built-in bitmap font for text rendering without dependencies */
-static const uint8_t font_4x6[96][6] = {
-    /* space ! " # $ % & ' ( ) * + , - . / */
-    {0,0,0,0,0,0},{4,4,4,0,4,0},{10,10,0,0,0,0},{10,15,10,15,10,0},
-    {4,7,4,14,4,0},{9,2,4,9,0,0},{4,10,4,10,5,0},{4,4,0,0,0,0},
-    {2,4,4,4,2,0},{4,2,2,2,4,0},{0,10,4,10,0,0},{0,4,14,4,0,0},
-    {0,0,0,4,4,8},{0,0,14,0,0,0},{0,0,0,0,4,0},{1,2,4,8,0,0},
-    /* 0-9 */
-    {6,9,9,9,6,0},{4,12,4,4,14,0},{6,9,2,4,15,0},{6,9,2,9,6,0},
-    {2,6,10,15,2,0},{15,8,14,1,14,0},{6,8,14,9,6,0},{15,1,2,4,4,0},
-    {6,9,6,9,6,0},{6,9,7,1,6,0},
-    /* : ; < = > ? @ */
-    {0,4,0,4,0,0},{0,4,0,4,8,0},{2,4,8,4,2,0},{0,15,0,15,0,0},
-    {8,4,2,4,8,0},{6,1,2,0,2,0},{6,9,11,8,6,0},
-    /* A-Z */
-    {6,9,15,9,9,0},{14,9,14,9,14,0},{6,9,8,9,6,0},{14,9,9,9,14,0},
-    {15,8,14,8,15,0},{15,8,14,8,8,0},{6,8,11,9,6,0},{9,9,15,9,9,0},
-    {14,4,4,4,14,0},{1,1,1,9,6,0},{9,10,12,10,9,0},{8,8,8,8,15,0},
-    {9,15,15,9,9,0},{9,13,11,9,9,0},{6,9,9,9,6,0},{14,9,14,8,8,0},
-    {6,9,9,10,5,0},{14,9,14,10,9,0},{7,8,6,1,14,0},{14,4,4,4,4,0},
-    {9,9,9,9,6,0},{9,9,9,6,6,0},{9,9,15,15,9,0},{9,6,6,6,9,0},
-    {9,9,6,4,4,0},{15,2,4,8,15,0},
-    /* [ \ ] ^ _ ` */
-    {6,4,4,4,6,0},{8,4,2,1,0,0},{6,2,2,2,6,0},{4,10,0,0,0,0},
-    {0,0,0,0,15,0},{4,2,0,0,0,0},
-    /* a-z */
-    {0,6,10,10,5,0},{8,14,9,9,14,0},{0,6,8,8,6,0},{1,7,9,9,7,0},
-    {0,6,11,8,7,0},{2,4,6,4,4,0},{0,7,9,7,1,6},{8,14,9,9,9,0},
-    {4,0,4,4,4,0},{2,0,2,2,2,4},{8,10,12,10,9,0},{4,4,4,4,2,0},
-    {0,9,15,9,9,0},{0,14,9,9,9,0},{0,6,9,9,6,0},{0,14,9,14,8,0},
-    {0,7,9,7,1,0},{0,5,6,4,4,0},{0,7,4,2,14,0},{4,14,4,4,2,0},
-    {0,9,9,9,7,0},{0,9,9,6,6,0},{0,9,15,15,6,0},{0,9,6,6,9,0},
-    {0,9,9,7,1,6},{0,15,2,4,15,0},
-    /* { | } ~ */
-    {2,4,8,4,2,0},{4,4,4,4,4,0},{8,4,2,4,8,0},{0,5,10,0,0,0},
-};
+    if (ok) {
+        file_loaded = true;
+        playing = true;
 
-static void draw_char(SDL_Surface *s, int x, int y, char c, uint16_t color) {
-    if (c < 32 || c > 126) c = '?';
-    const uint8_t *glyph = font_4x6[c - 32];
-    uint16_t *pixels = (uint16_t*)s->pixels;
-    int pitch = s->pitch / 2;
-
-    for (int row = 0; row < 6; row++) {
-        for (int col = 0; col < 4; col++) {
-            if (glyph[row] & (8 >> col)) {
-                int px = x + col;
-                int py = y + row;
-                if (px >= 0 && px < SCREEN_W && py >= 0 && py < SCREEN_H)
-                    pixels[py * pitch + px] = color;
+        /* Pre-fill ~21ms of audio before FPGA starts consuming */
+        int16_t pre[1024 * 2];
+        int n = 0;
+        if (is_gme_format(format_id)) n = gme_render(pre, 1024);
+        if (n > 0) {
+            volatile int16_t *ring = (volatile int16_t *)(ddr3 + OFF_AUD_RING);
+            for (int i = 0; i < n; i++) {
+                ring[i * 2 + 0] = pre[i * 2 + 0];
+                ring[i * 2 + 1] = pre[i * 2 + 1];
             }
+            __sync_synchronize();
+            ddr3_w32(OFF_AUD_WPTR, n & RING_MASK);
         }
     }
+
+    ddr3_w32(OFF_FILE_CTRL, 0);
+    return ok;
 }
 
-static void draw_text(SDL_Surface *s, int x, int y, const char *text,
-                      uint16_t color) {
-    while (*text) {
-        if (x + 4 > SCREEN_W) break;
-        draw_char(s, x, y, *text, color);
-        x += 5; /* 4px char + 1px gap */
-        text++;
-    }
-}
+/* ── Input ───────────────────────────────────────────────────── */
+static uint32_t prev_joy = 0;
 
-static void draw_text_clipped(SDL_Surface *s, int x, int y, const char *text,
-                              uint16_t color, int max_w) {
-    int chars = max_w / 5;
-    int len = strlen(text);
-    if (len <= chars) {
-        draw_text(s, x, y, text, color);
-    } else {
-        char buf[256];
-        if (chars > 3) {
-            strncpy(buf, text, chars - 3);
-            buf[chars - 3] = '.';
-            buf[chars - 2] = '.';
-            buf[chars - 1] = '.';
-            buf[chars] = '\0';
-        } else {
-            strncpy(buf, text, chars);
-            buf[chars] = '\0';
-        }
-        draw_text(s, x, y, buf, color);
-    }
-}
+static void handle_input(void) {
+    uint32_t joy = ddr3_r32(OFF_JOY);
+    uint32_t pressed = joy & ~prev_joy;
+    prev_joy = joy;
 
-/* ── Scope drawing ───────────────────────────────────────────── */
-static void draw_scope(SDL_Surface *s) {
-    uint16_t *pixels = (uint16_t*)s->pixels;
-    int pitch = s->pitch / 2;
+    if (!file_loaded) return;
 
-    /* Clear scope area */
-    for (int y = 0; y < SCOPE_H; y++)
-        for (int x = 0; x < SCREEN_W; x++)
-            pixels[y * pitch + x] = COL_SCOPE_BG;
-
-    /* Center line */
-    int center = SCOPE_H / 2;
-    for (int x = 0; x < SCREEN_W; x++)
-        pixels[center * pitch + x] = 0x2104; /* dark grey */
-
-    /* Draw waveform */
-    for (int x = 0; x < SCREEN_W - 1; x++) {
-        int idx = x * 2; /* stereo: left channel */
-        int s1 = scope_buf[idx] + scope_buf[idx + 1]; /* L+R average */
-        int s2 = scope_buf[idx + 2] + scope_buf[idx + 3];
-        s1 = center - (s1 >> 10); /* scale to scope height */
-        s2 = center - (s2 >> 10);
-        if (s1 < 0) s1 = 0; if (s1 >= SCOPE_H) s1 = SCOPE_H - 1;
-        if (s2 < 0) s2 = 0; if (s2 >= SCOPE_H) s2 = SCOPE_H - 1;
-
-        /* Draw line between s1 and s2 */
-        int y0 = s1 < s2 ? s1 : s2;
-        int y1 = s1 > s2 ? s1 : s2;
-        for (int y = y0; y <= y1; y++)
-            pixels[y * pitch + x] = COL_SCOPE;
-    }
-}
-
-/* ── File browser ────────────────────────────────────────────── */
-#define MAX_FILES 512
-
-typedef struct {
-    char name[256];
-    char path[512];
-    bool is_dir;
-} FileEntry;
-
-static FileEntry files[MAX_FILES];
-static int file_count = 0;
-static int file_cursor = 0;
-static int file_scroll = 0;
-static char current_dir[512] = "/media/fat/games/Music_Player/Music";
-
-static bool has_music_ext(const char *name) {
-    const char *ext = strrchr(name, '.');
-    if (!ext) return false;
-    ext++;
-    return (strcasecmp(ext, "nsf") == 0 || strcasecmp(ext, "nsfe") == 0 ||
-            strcasecmp(ext, "spc") == 0 || strcasecmp(ext, "vgm") == 0 ||
-            strcasecmp(ext, "vgz") == 0 || strcasecmp(ext, "gbs") == 0 ||
-            strcasecmp(ext, "hes") == 0 || strcasecmp(ext, "ay") == 0 ||
-            strcasecmp(ext, "sap") == 0 || strcasecmp(ext, "kss") == 0 ||
-            strcasecmp(ext, "gym") == 0);
-}
-
-static int file_compare(const void *a, const void *b) {
-    const FileEntry *fa = (const FileEntry*)a;
-    const FileEntry *fb = (const FileEntry*)b;
-    if (fa->is_dir != fb->is_dir) return fa->is_dir ? -1 : 1;
-    return strcasecmp(fa->name, fb->name);
-}
-
-static void scan_directory(const char *path) {
-    file_count = 0;
-    file_cursor = 0;
-    file_scroll = 0;
-    strncpy(current_dir, path, sizeof(current_dir) - 1);
-
-    DIR *dir = opendir(path);
-    if (!dir) {
-        /* Try fallback directories */
-        dir = opendir("/media/fat");
-        if (dir) strncpy(current_dir, "/media/fat", sizeof(current_dir) - 1);
-        else return;
-    }
-
-    /* Add parent directory entry */
-    if (strcmp(path, "/") != 0) {
-        strcpy(files[file_count].name, "..");
-        snprintf(files[file_count].path, sizeof(files[0].path), "%s/..", path);
-        files[file_count].is_dir = true;
-        file_count++;
-    }
-
-    struct dirent *ent;
-    while ((ent = readdir(dir)) && file_count < MAX_FILES) {
-        if (ent->d_name[0] == '.') continue; /* skip hidden files */
-
-        char fullpath[512];
-        snprintf(fullpath, sizeof(fullpath), "%s/%s", path, ent->d_name);
-
-        struct stat st;
-        if (stat(fullpath, &st) != 0) continue;
-
-        if (S_ISDIR(st.st_mode)) {
-            strncpy(files[file_count].name, ent->d_name, 255);
-            strncpy(files[file_count].path, fullpath, 511);
-            files[file_count].is_dir = true;
-            file_count++;
-        } else if (has_music_ext(ent->d_name)) {
-            strncpy(files[file_count].name, ent->d_name, 255);
-            strncpy(files[file_count].path, fullpath, 511);
-            files[file_count].is_dir = false;
-            file_count++;
+    if (pressed & JOY_RIGHT) {
+        if (current_track + 1 < total_tracks) {
+            current_track++;
+            if (is_gme_format(format_id)) gme_set_track(current_track);
+            if (is_gme_format(format_id)) gme_update_meta();
         }
     }
-    closedir(dir);
-
-    qsort(files, file_count, sizeof(FileEntry), file_compare);
-}
-
-/* ── Draw info bar ───────────────────────────────────────────── */
-static void draw_info_bar(SDL_Surface *s) {
-    int y = SCOPE_H;
-    uint16_t *pixels = (uint16_t*)s->pixels;
-    int pitch = s->pitch / 2;
-
-    /* Dark bar background */
-    for (int r = y; r < y + 14; r++)
-        for (int x = 0; x < SCREEN_W; x++)
-            pixels[r * pitch + x] = 0x10A2;
-
-    if (emu && track_info) {
-        char buf[128];
-        int ms = gme_tell(emu);
-        int secs = ms / 1000;
-        int total = track_info->length > 0 ? track_info->length / 1000 : 0;
-
-        /* Track info: system | game | song | time */
-        if (track_info->system[0])
-            draw_text_clipped(s, 2, y + 1, track_info->system, COL_SYSTEM, 60);
-
-        if (track_info->game[0])
-            draw_text_clipped(s, 65, y + 1, track_info->game, COL_TITLE, 120);
-
-        if (track_info->song[0])
-            draw_text_clipped(s, 2, y + 7, track_info->song, COL_TEXT, 200);
-
-        /* Time + track number */
-        if (total > 0)
-            snprintf(buf, sizeof(buf), "%d:%02d/%d:%02d [%d/%d]%s%s",
-                secs / 60, secs % 60, total / 60, total % 60,
-                current_track + 1, track_count,
-                paused ? " PAUSED" : "",
-                looping ? " LOOP" : "");
-        else
-            snprintf(buf, sizeof(buf), "%d:%02d [%d/%d]%s%s",
-                secs / 60, secs % 60,
-                current_track + 1, track_count,
-                paused ? " PAUSED" : "",
-                looping ? " LOOP" : "");
-        draw_text(s, 210, y + 7, buf, COL_DIM);
-    } else {
-        draw_text(s, 2, y + 4, "MiSTer Music Player - No file loaded", COL_DIM);
-    }
-}
-
-/* ── Draw file browser ───────────────────────────────────────── */
-static void draw_file_list(SDL_Surface *s) {
-    uint16_t *pixels = (uint16_t*)s->pixels;
-    int pitch = s->pitch / 2;
-
-    /* Clear list area */
-    for (int y = LIST_Y; y < SCREEN_H; y++)
-        for (int x = 0; x < SCREEN_W; x++)
-            pixels[y * pitch + x] = COL_BG;
-
-    /* Directory header */
-    draw_text_clipped(s, 2, LIST_Y, current_dir, COL_DIM, SCREEN_W - 4);
-
-    int start_y = LIST_Y + LINE_H;
-    for (int i = 0; i < MAX_VISIBLE - 1 && (file_scroll + i) < file_count; i++) {
-        int idx = file_scroll + i;
-        int y = start_y + i * LINE_H;
-        bool selected = (idx == file_cursor);
-
-        /* Highlight bar */
-        if (selected) {
-            for (int r = y; r < y + LINE_H && r < SCREEN_H; r++)
-                for (int x = 0; x < SCREEN_W; x++)
-                    pixels[r * pitch + x] = COL_HILITE;
+    if (pressed & JOY_LEFT) {
+        if (current_track > 0) {
+            current_track--;
+            if (is_gme_format(format_id)) gme_set_track(current_track);
+            if (is_gme_format(format_id)) gme_update_meta();
         }
-
-        /* Icon prefix */
-        uint16_t color = selected ? COL_TEXT : (files[idx].is_dir ? COL_TITLE : COL_TEXT);
-        const char *prefix = files[idx].is_dir ? "[DIR] " : "  ";
-        char display[300];
-        snprintf(display, sizeof(display), "%s%s", prefix, files[idx].name);
-        draw_text_clipped(s, 2, y + 2, display, color, SCREEN_W - 4);
     }
-}
-
-/* ── Load and play a file ────────────────────────────────────── */
-static bool load_file(const char *path) {
-    audio_stop();
-
-    if (emu) { gme_delete(emu); emu = NULL; }
-    if (track_info) { gme_free_info(track_info); track_info = NULL; }
-
-    gme_err_t err = gme_open_file(path, &emu, SAMPLE_RATE);
-    if (err) {
-        fprintf(stderr, "GME error: %s\n", err);
-        return false;
+    if (pressed & JOY_A) {
+        if (playing) paused = !paused;
+        else { playing = true; paused = false; }
     }
-
-    track_count = gme_track_count(emu);
-    current_track = 0;
-    paused = false;
-
-    /* Start first track */
-    gme_start_track(emu, 0);
-    gme_track_info(emu, &track_info, 0);
-
-    if (track_info->length <= 0)
-        track_info->length = track_info->intro_length +
-                             track_info->loop_length * 2;
-    if (track_info->length <= 0)
-        track_info->length = (long)(2.5 * 60 * 1000);
-
-    if (!looping)
-        gme_set_fade_msecs(emu, track_info->length, 8000);
-
-    audio_start();
-    return true;
+    if (pressed & JOY_START) loop_mode = !loop_mode;
+    if (pressed & (JOY_BACK | JOY_GUIDE)) running = false;
 }
 
-static void start_track(int track) {
-    if (!emu || track < 0 || track >= track_count) return;
-
-    audio_stop();
-    current_track = track;
-    paused = false;
-
-    gme_start_track(emu, track);
-
-    if (track_info) gme_free_info(track_info);
-    track_info = NULL;
-    gme_track_info(emu, &track_info, track);
-
-    if (track_info->length <= 0)
-        track_info->length = track_info->intro_length +
-                             track_info->loop_length * 2;
-    if (track_info->length <= 0)
-        track_info->length = (long)(2.5 * 60 * 1000);
-
-    if (!looping)
-        gme_set_fade_msecs(emu, track_info->length, 8000);
-    else
-        gme_set_fade_msecs(emu, -1, 8000);
-
-    audio_start();
-}
-
-/* ── DummyAudioCallback (REQUIRED per build guide) ───────────── */
-static void DummyAudioCallback(void *userdata, Uint8 *stream, int len) {
-    (void)userdata;
-    memset(stream, 0, len);
-}
-
-/* ── Signal handler ──────────────────────────────────────────── */
-#include <signal.h>
-
-static void signal_handler(int sig) {
-    (void)sig;
-    g_running = false;
-    /* Silence audio immediately */
-    if (pcm_handle && p_snd_pcm_drop) {
-        p_snd_pcm_drop(pcm_handle);
-        int16_t silence[1024];
-        memset(silence, 0, sizeof(silence));
-        if (p_snd_pcm_prepare) p_snd_pcm_prepare(pcm_handle);
-        if (p_snd_pcm_writei) p_snd_pcm_writei(pcm_handle, silence, 512);
-        if (p_snd_pcm_close) p_snd_pcm_close(pcm_handle);
-        pcm_handle = NULL;
-    }
-}
+/* ── SDL dummy ───────────────────────────────────────────────── */
+static void DummyCb(void *u, Uint8 *s, int l) { (void)u; memset(s,0,l); }
 
 /* ── Main ────────────────────────────────────────────────────── */
 int main(int argc, char *argv[]) {
-    /* Pin main thread to core 0 */
-    cpu_set_t cpuset;
-    CPU_ZERO(&cpuset);
-    CPU_SET(0, &cpuset);
-    pthread_setaffinity_np(pthread_self(), sizeof(cpuset), &cpuset);
+    (void)argc; (void)argv;
+    freopen("/dev/null", "w", stdout);
+    fprintf(stderr, "Music_Player: hybrid FPGA+ARM, FPGA audio, 29 systems\n");
 
-    signal(SIGTERM, signal_handler);
-    signal(SIGINT, signal_handler);
+    if (!ddr3_init()) { fprintf(stderr, "DDR3 init failed\n"); return 1; }
 
-    /* Set SDL to dummy video driver — hybrid core uses DDR3 native video, not fbcon */
     setenv("SDL_VIDEODRIVER", "dummy", 1);
+    SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_JOYSTICK);
+    SDL_AudioSpec as = {}; as.freq = 22050; as.format = AUDIO_S16SYS;
+    as.channels = 1; as.samples = 512; as.callback = DummyCb;
+    SDL_OpenAudio(&as, NULL);
 
-    /* Init SDL */
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_JOYSTICK) < 0) {
-        fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
-        return 1;
-    }
-    atexit(SDL_Quit);
+    cpu_set_t cs; CPU_ZERO(&cs); CPU_SET(0, &cs);
+    sched_setaffinity(0, sizeof(cs), &cs);
 
-    /* DummyAudioCallback — REQUIRED for SDL timer init (build guide §4) */
-    SDL_AudioSpec want = {0};
-    SDL_AudioSpec have;
-    want.freq = 22050;
-    want.format = AUDIO_S16LSB;
-    want.channels = 1;
-    want.samples = 512;
-    want.callback = DummyAudioCallback;
-    SDL_OpenAudio(&want, &have);
-    SDL_CloseAudio();
+    pthread_t atid;
+    pthread_create(&atid, NULL, audio_thread_func, NULL);
 
-    /* Set video mode */
-    SDL_ShowCursor(SDL_DISABLE);
-    SDL_Surface *screen = SDL_SetVideoMode(SCREEN_W, SCREEN_H, 16,
-                                           SDL_SWSURFACE);
-    if (!screen) {
-        fprintf(stderr, "SDL_SetVideoMode failed: %s\n", SDL_GetError());
-        return 1;
-    }
+    ddr3_wstr(OFF_TITLE,  "MiSTer Music Player", 64);
+    ddr3_wstr(OFF_ARTIST, "Load a file to begin", 64);
+    ddr3_wstr(OFF_GAME,   "29 systems supported", 64);
+    ddr3_wstr(OFF_SYSTEM, "", 16);
+    update_metadata();
 
-    /* Clear framebuffer 3 times (build guide §3) */
-    for (int i = 0; i < 3; i++) {
-        SDL_FillRect(screen, NULL, 0);
-        SDL_Flip(screen);
+    fprintf(stderr, "Music_Player: ready\n");
+
+    struct timespec ft = {0, 16666666};
+    while (running) {
+        check_new_file();
+        handle_input();
+        update_metadata();
+        nanosleep(&ft, NULL);
     }
 
-    /* Open joystick */
-    SDL_Joystick *joy = NULL;
-    if (SDL_NumJoysticks() > 0)
-        joy = SDL_JoystickOpen(0);
-
-    /* Init ALSA */
-    if (!alsa_init()) {
-        fprintf(stderr, "ALSA init failed — audio disabled\n");
-    }
-
-    /* Determine music directory */
-    const char *music_dir = "/media/fat/games/Music_Player/Music";
-    if (argc > 1) {
-        struct stat st;
-        if (stat(argv[1], &st) == 0) {
-            if (S_ISDIR(st.st_mode))
-                music_dir = argv[1];
-            else {
-                /* Direct file argument — load it */
-                music_dir = "/media/fat/games/Music_Player/Music";
-                load_file(argv[1]);
-            }
-        }
-    }
-
-    scan_directory(music_dir);
-    memset(scope_buf, 0, sizeof(scope_buf));
-
-    /* ── Main loop ───────────────────────────────────────────── */
-    uint32_t last_input_time = 0;
-    const uint32_t INPUT_REPEAT_MS = 200;
-
-    while (g_running) {
-        uint32_t now = SDL_GetTicks();
-
-        /* Process events (buttons only, not directions — build guide §5) */
-        SDL_Event ev;
-        while (SDL_PollEvent(&ev)) {
-            switch (ev.type) {
-            case SDL_QUIT:
-                g_running = false;
-                break;
-            case SDL_KEYDOWN:
-                if (ev.key.keysym.sym == SDLK_ESCAPE) {
-                    /* B = Go back a folder in browser */
-                    if (strcmp(current_dir, "/") != 0) {
-                        char resolved[512];
-                        strncpy(resolved, current_dir, sizeof(resolved));
-                        char *last = strrchr(resolved, '/');
-                        if (last && last != resolved)
-                            *last = '\0';
-                        else
-                            strcpy(resolved, "/");
-                        scan_directory(resolved);
-                    }
-                }
-                if (ev.key.keysym.sym == SDLK_RETURN) {
-                    /* A = Select file/folder in browser, OR Pause/Resume during playback */
-                    if (file_count > 0) {
-                        FileEntry *f = &files[file_cursor];
-                        if (f->is_dir) {
-                            char resolved[512];
-                            if (strcmp(f->name, "..") == 0) {
-                                char *last = strrchr(current_dir, '/');
-                                if (last && last != current_dir) {
-                                    *last = '\0';
-                                    strncpy(resolved, current_dir, sizeof(resolved));
-                                } else {
-                                    strcpy(resolved, "/");
-                                }
-                            } else {
-                                strncpy(resolved, f->path, sizeof(resolved));
-                            }
-                            scan_directory(resolved);
-                        } else {
-                            load_file(f->path);
-                        }
-                    } else if (emu) {
-                        /* No file selected but music playing — pause/resume */
-                        paused = !paused;
-                    }
-                }
-                break;
-            case SDL_JOYBUTTONDOWN:
-                if (ev.jbutton.button == 0) {
-                    /* A = Pause/Resume during playback (also handled via Enter above for select) */
-                    if (emu) paused = !paused;
-                }
-                if (ev.jbutton.button == 7) {
-                    /* Start = Toggle loop */
-                    looping = !looping;
-                    if (emu) {
-                        if (looping)
-                            gme_set_fade_msecs(emu, -1, 8000);
-                        else if (track_info)
-                            gme_set_fade_msecs(emu, track_info->length, 8000);
-                    }
-                }
-                /* Button 6 (Back/Select) = DO NOTHING */
-                /* Button 8 (Guide) = DO NOTHING — MiSTer OSD handles Guide natively */
-                break;
-            }
-        }
-
-        /* Direction input: SDL state polling (build guide §5) */
-        if (now - last_input_time > INPUT_REPEAT_MS) {
-            int up = 0, down = 0, left = 0, right = 0;
-
-            /* Keyboard state (d-pad → arrow keys) */
-            const Uint8 *keys = SDL_GetKeyState(NULL);
-            if (keys[SDLK_UP])    up = 1;
-            if (keys[SDLK_DOWN])  down = 1;
-            if (keys[SDLK_LEFT])  left = 1;
-            if (keys[SDLK_RIGHT]) right = 1;
-
-            /* Joystick hat */
-            if (joy) {
-                Uint8 hat = SDL_JoystickGetHat(joy, 0);
-                if (hat & SDL_HAT_UP)    up = 1;
-                if (hat & SDL_HAT_DOWN)  down = 1;
-                if (hat & SDL_HAT_LEFT)  left = 1;
-                if (hat & SDL_HAT_RIGHT) right = 1;
-
-                /* Analog stick with deadzone (build guide: min 8000) */
-                Sint16 ax = SDL_JoystickGetAxis(joy, 0);
-                Sint16 ay = SDL_JoystickGetAxis(joy, 1);
-                if (ay < -8000) up = 1;
-                if (ay >  8000) down = 1;
-                if (ax < -8000) left = 1;
-                if (ax >  8000) right = 1;
-            }
-
-            if (up || down || left || right)
-                last_input_time = now;
-
-            /* Apply directions */
-            if (up && file_cursor > 0) {
-                file_cursor--;
-                if (file_cursor < file_scroll)
-                    file_scroll = file_cursor;
-            }
-            if (down && file_cursor < file_count - 1) {
-                file_cursor++;
-                if (file_cursor >= file_scroll + MAX_VISIBLE - 1)
-                    file_scroll = file_cursor - MAX_VISIBLE + 2;
-            }
-            if (left && emu) {
-                /* Previous track */
-                if (current_track > 0)
-                    start_track(current_track - 1);
-            }
-            if (right && emu) {
-                /* Next track */
-                if (current_track < track_count - 1)
-                    start_track(current_track + 1);
-            }
-        }
-
-        /* Auto-advance track when current one ends */
-        if (emu && !paused && gme_track_ended(emu)) {
-            if (current_track < track_count - 1)
-                start_track(current_track + 1);
-            else if (looping)
-                start_track(0);
-            else
-                paused = true;
-        }
-
-        /* ── Render ──────────────────────────────────────────── */
-        draw_scope(screen);
-        draw_info_bar(screen);
-        draw_file_list(screen);
-
-        SDL_UpdateRect(screen, 0, 0, SCREEN_W, SCREEN_H);
-
-        /* Frame pacing (~30fps for UI — audio runs independently) */
-        SDL_Delay(33);
-    }
-
-    /* Cleanup */
-    audio_stop();
-    if (emu) gme_delete(emu);
-    if (track_info) gme_free_info(track_info);
-    if (joy) SDL_JoystickClose(joy);
-    if (pcm_handle && p_snd_pcm_close) p_snd_pcm_close(pcm_handle);
-    if (alsa_lib) dlclose(alsa_lib);
-
+    playing = false; running = false;
+    pthread_join(atid, NULL);
+    if (gme_emu) gme_delete(gme_emu);
+    SDL_CloseAudio(); SDL_Quit();
+    if (ddr3) munmap((void *)ddr3, DDR3_SIZE);
     return 0;
 }

@@ -2,4 +2,6 @@ set_global_assignment -name VERILOG_FILE rtl/lfsr.v
 set_global_assignment -name SYSTEMVERILOG_FILE Music_Player.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/mp_video_top.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/mp_video_timing.sv
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/mp_video_reader.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/mp_video_renderer.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/mp_font_rom.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/mp_audio_out.sv

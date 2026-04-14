@@ -1,5 +1,6 @@
 # MiSTer Music Player — Makefile
-# Builds inside arm32v7/debian:bullseye-slim container via QEMU
+# Phase 1: GME only. Future phases add more libraries.
+# Builds inside arm32v7/debian:bullseye-slim container via QEMU.
 
 # ── Paths ────────────────────────────────────────────────────────
 GME_DIR    = game-music-emu/gme
@@ -17,8 +18,10 @@ CXXFLAGS = -mcpu=cortex-a9 -mtune=cortex-a9 -mfloat-abi=hard -mfpu=neon \
            -Wno-unused-result
 CFLAGS   = $(CXXFLAGS)
 LDFLAGS  = -static-libstdc++ -static-libgcc \
-           $(SDL_LIBS) -lm -ldl -lpthread -lrt \
+           $(SDL_LIBS) -lm -lpthread -lrt \
            -Wl,--gc-sections -Wl,--as-needed
+
+# Note: No -ldl (no ALSA dlopen needed — FPGA handles audio)
 
 # ── GME sources ──────────────────────────────────────────────────
 GME_SRC = $(wildcard $(GME_DIR)/*.cpp) $(GME_DIR)/ext/emu2413.c
@@ -36,8 +39,7 @@ $(BIN): $(GME_OBJ) $(PLAYER_OBJ)
 	$(CXX) $^ -o $@ $(LDFLAGS)
 	strip $@
 	@echo ""
-	@echo "Built: $(BIN)"
-	@file $(BIN) 2>/dev/null || true
+	@echo "Built: $(BIN) (Phase 1: GME — 16 systems)"
 	@ls -lh $(BIN)
 
 %.o: %.cpp
