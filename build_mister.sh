@@ -132,11 +132,11 @@ else
     echo "Try manually copying Music_Player to $GAME_DIR/"
 fi
 INSTALL_EOF
-chmod +x $RELEASE/Install_Music_Player.sh
 
-# Also put install script in Scripts folder for MiSTer menu access
+# Put install script in Scripts folder for MiSTer menu access
 mkdir -p $RELEASE/Scripts
-cp $RELEASE/Install_Music_Player.sh $RELEASE/Scripts/
+mv $RELEASE/Install_Music_Player.sh $RELEASE/Scripts/
+chmod +x $RELEASE/Scripts/Install_Music_Player.sh
 
 echo ""
 echo "=== Build Complete ==="
