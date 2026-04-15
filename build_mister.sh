@@ -47,12 +47,26 @@ echo ""
 
 # ── 1. Dependencies ─────────────────────────────────────────────
 echo ">>> [1/15] Installing build dependencies..."
-apt-get update -qq || { echo "ERROR: apt-get update failed"; exit 1; }
-apt-get install -y -qq \
-    build-essential wget git cmake autoconf automake libtool libtool-bin \
-    pkg-config zlib1g-dev gperf autopoint gettext bison flex \
-    xa65 \
-    || { echo "ERROR: apt-get install failed"; exit 1; }
+APT_PACKAGES="build-essential wget git cmake autoconf automake libtool libtool-bin \
+    pkg-config zlib1g-dev gperf autopoint gettext bison flex xa65"
+
+apt_try() {
+    apt-get update -qq && apt-get install -y -qq --fix-missing $APT_PACKAGES
+}
+
+# Debian mirrors occasionally reset mid-download; retry up to 3 times
+# with a short sleep before giving up.
+for attempt in 1 2 3; do
+    if apt_try; then
+        break
+    fi
+    echo "apt-get install attempt $attempt failed; retrying in 10s..."
+    sleep 10
+    if [ "$attempt" = "3" ]; then
+        echo "ERROR: apt-get install failed after 3 attempts"
+        exit 1
+    fi
+done
 
 # ── 2. SDL 1.2.15 ──────────────────────────────────────────────
 echo ">>> [2/15] Building SDL 1.2.15..."
