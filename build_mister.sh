@@ -80,13 +80,18 @@ if [ ! -f "$PREFIX/lib/libsidplayfp.a" ]; then
     [ ! -d "libsidplayfp" ] && git clone --depth 1 https://github.com/libsidplayfp/libsidplayfp.git
     cd libsidplayfp
     {
+        # configure.ac declares these m4 dirs via AC_CONFIG_MACRO_DIRS;
+        # aclocal scans them even when the corresponding builder is
+        # disabled. Create empty dirs so autoreconf doesn't die.
+        mkdir -p m4 \
+                 src/builders/exsid-builder/driver/m4 \
+                 src/builders/hardsid-builder/hardsid/m4 \
+                 src/builders/hardsid-builder/m4
         autoreconf -vfi
-        if [ -f configure ]; then
-            CXXFLAGS="$CF" CFLAGS="$CF" ./configure --prefix=$PREFIX \
-                --enable-static --disable-shared --with-simd=none \
-                --disable-hardsid --disable-exsid --disable-usbsid
-            make -j$NPROC && make install
-        fi
+        CXXFLAGS="$CF" CFLAGS="$CF" ./configure --prefix=$PREFIX \
+            --enable-static --disable-shared --with-simd=none \
+            --disable-hardsid --disable-exsid --disable-usbsid
+        make -j$NPROC && make install
     } > $LOGS/sidplayfp.log 2>&1
 fi
 [ -f "$PREFIX/lib/libsidplayfp.a" ] && echo "    OK" || { echo "    FAIL — tail of log:"; tail -30 $LOGS/sidplayfp.log; }
@@ -95,17 +100,24 @@ fi
 echo ">>> [5/15] Building libopenmpt..."
 cd $LIBS
 if [ ! -f "$PREFIX/lib/libopenmpt.a" ]; then
-    [ ! -d "openmpt" ] && git clone --depth 1 https://github.com/OpenMPT/openmpt.git
-    cd openmpt
+    # Use the -autotools archive: the `make CONFIG=generic` path was
+    # removed upstream, but libopenmpt continues to ship an autotools
+    # tarball on their release page that builds cleanly with ./configure.
+    [ ! -f openmpt-src.tar.gz ] && wget -q -O openmpt-src.tar.gz \
+        https://lib.openmpt.org/files/libopenmpt/src/libopenmpt-0.7.13+release.autotools.tar.gz
+    rm -rf openmpt-src && mkdir -p openmpt-src && \
+        tar xzf openmpt-src.tar.gz -C openmpt-src --strip-components=1
+    cd openmpt-src
     {
-        CXXFLAGS="$CF" CFLAGS="$CF" make -j$NPROC CONFIG=generic DYNLINK=0 \
-            EXAMPLES=0 OPENMPT123=0 TEST=0 \
-            NO_MINIMP3=1 NO_STBVORBIS=1 NO_OGG=1 NO_VORBIS=1 NO_VORBISFILE=1 \
-            NO_MPG123=1 NO_FLAC=1 NO_SNDFILE=1 NO_PORTAUDIO=1 NO_PULSEAUDIO=1 \
-            && cp bin/libopenmpt.a $PREFIX/lib/ \
-            && mkdir -p $PREFIX/include/libopenmpt \
-            && cp libopenmpt/libopenmpt.h libopenmpt/libopenmpt_config.h \
-                  libopenmpt/libopenmpt_version.h $PREFIX/include/libopenmpt/
+        CXXFLAGS="$CF" CFLAGS="$CF" ./configure --prefix=$PREFIX \
+            --enable-static --disable-shared \
+            --disable-openmpt123 --disable-tests --disable-examples \
+            --without-mpg123 --without-ogg --without-vorbis \
+            --without-vorbisfile --without-sndfile --without-flac \
+            --without-portaudio --without-portaudiocpp \
+            --without-pulseaudio --without-sdl2
+        make -j$NPROC
+        make install
     } > $LOGS/openmpt.log 2>&1
 fi
 [ -f "$PREFIX/lib/libopenmpt.a" ] && echo "    OK" || { echo "    FAIL — tail of log:"; tail -30 $LOGS/openmpt.log; }
@@ -114,14 +126,54 @@ fi
 echo ">>> [6/15] Building sc68..."
 cd $LIBS
 if [ ! -f "$PREFIX/lib/libsc68.a" ]; then
+    # Zeinok/sc68 autotools is broken (Makefile.am:59 SOURCE_UNICE68
+    # missing). Manual build of the four subtrees (unice68, file68,
+    # emu68, libsc68), packing their .o files into one archive that
+    # exposes the sc68_* API without running autoreconf.
     [ ! -d "sc68" ] && git clone --depth 1 https://github.com/Zeinok/sc68.git
     cd sc68
     {
-        autoreconf -vfi || true
-        CFLAGS="$CF" CXXFLAGS="$CF" ./configure --prefix=$PREFIX \
-            --enable-static --disable-shared
-        make -j$NPROC
-        make install
+        mkdir -p $PREFIX/include/sc68
+        cat > sc68_config_stub.h <<'CFG_EOF'
+#ifndef SC68_CONFIG_STUB_H
+#define SC68_CONFIG_STUB_H
+#define PACKAGE_VERSION "3.0.0"
+#define PACKAGE_STRING  "sc68 3.0.0"
+#define PACKAGE_NAME    "sc68"
+#define VERSION         "3.0.0"
+#define HAVE_STDINT_H   1
+#define HAVE_STDLIB_H   1
+#define HAVE_STRING_H   1
+#define HAVE_UNISTD_H   1
+#define HAVE_ASSERT_H   1
+#define HAVE_MATH_H     1
+#define U_INLINE        inline
+#define SC68_INLINE     inline
+#endif
+CFG_EOF
+        SC68_CF="$CF -DHAVE_CONFIG_H -include $(pwd)/sc68_config_stub.h -Wno-error"
+        for f in unice68/unice68/*.c; do
+            [ -f "$f" ] && gcc -c $SC68_CF -Iunice68/unice68 "$f" -o "${f%.c}.o" || true
+        done
+        for f in file68/file68/*.c; do
+            [ -f "$f" ] && gcc -c $SC68_CF -Ifile68 -Ifile68/file68 \
+                -Iunice68/unice68 "$f" -o "${f%.c}.o" || true
+        done
+        for f in emu68/emu68/*.c; do
+            [ -f "$f" ] && gcc -c $SC68_CF -Iemu68 -Iemu68/emu68 \
+                -Ifile68 -Ifile68/file68 "$f" -o "${f%.c}.o" || true
+        done
+        for f in libsc68/libsc68/*.c; do
+            [ -f "$f" ] && gcc -c $SC68_CF -Ilibsc68 -Ilibsc68/libsc68 \
+                -Iemu68 -Iemu68/emu68 -Ifile68 -Ifile68/file68 \
+                -Iunice68/unice68 "$f" -o "${f%.c}.o" || true
+        done
+        find unice68 file68 emu68 libsc68 -name "*.o" 2>/dev/null \
+            | xargs ar rcs $PREFIX/lib/libsc68.a
+        # Thin alias -- Makefile link line references -lfile68 separately.
+        cp $PREFIX/lib/libsc68.a $PREFIX/lib/libfile68.a
+        cp -r libsc68/sc68 $PREFIX/include/ 2>/dev/null || true
+        cp -r file68/sc68 $PREFIX/include/ 2>/dev/null || true
     } > $LOGS/sc68.log 2>&1
 fi
 [ -f "$PREFIX/lib/libsc68.a" ] && echo "    OK" || { echo "    FAIL — tail of log:"; tail -30 $LOGS/sc68.log; }
@@ -148,8 +200,10 @@ if [ ! -f "$PREFIX/lib/libhe.a" ]; then
     [ ! -d "Highly_Experimental" ] && git clone --depth 1 https://github.com/kode54/Highly_Experimental.git
     cd Highly_Experimental
     {
+        # Every core .c starts with #error unless EMU_COMPILE is defined.
+        HE_CF="$CF -DEMU_COMPILE=\"\\\"2026-MiSTer\\\"\" -DEMU_RELEASE=\"\\\"2026\\\"\" -Wno-error"
         find . -name "*.c" | while read f; do
-            gcc -c $CF -I. -Icore -ICore -I$PREFIX/include "$f" -o "${f%.c}.o" || true
+            gcc -c $HE_CF -I. -ICore -I$PREFIX/include "$f" -o "${f%.c}.o" || true
         done
         find . -name "*.o" | xargs ar rcs $PREFIX/lib/libhe.a || true
         mkdir -p $PREFIX/include/he
@@ -165,8 +219,14 @@ if [ ! -f "$PREFIX/lib/libht.a" ]; then
     [ ! -d "Highly_Theoretical" ] && git clone --depth 1 https://github.com/kode54/Highly_Theoretical.git
     cd Highly_Theoretical
     {
-        find . -name "*.c" | while read f; do
-            gcc -c $CF -I. -Icore -ICore -I$PREFIX/include "$f" -o "${f%.c}.o" || true
+        # EMU_COMPILE + pointer-type compat for C68k (satsound.c casts
+        # a uint8* to 'pointer' which is defined as uint32 in c68k.h).
+        HT_CF="$CF -DEMU_COMPILE=\"\\\"2026-MiSTer\\\"\" -DEMU_RELEASE=\"\\\"2026\\\"\" -Wno-error -Wno-int-conversion -Wno-implicit-function-declaration -Wno-incompatible-pointer-types"
+        # Starscream's generated cpudebug.h isn't shipped; stub it out.
+        mkdir -p Core/Starscream
+        touch Core/Starscream/cpudebug.h
+        find . -name "*.c" -not -path "./Core/Starscream/cpudebug.c" | while read f; do
+            gcc -c $HT_CF -I. -ICore -ICore/c68k -ICore/Starscream -I$PREFIX/include "$f" -o "${f%.c}.o" || true
         done
         find . -name "*.o" | xargs ar rcs $PREFIX/lib/libht.a || true
         mkdir -p $PREFIX/include/ht
@@ -179,21 +239,20 @@ fi
 echo ">>> [10/15] Building lazyusf2 (N64 USF)..."
 cd $LIBS
 if [ ! -f "$PREFIX/lib/liblazyusf.a" ]; then
-    [ ! -d "lazyusf2" ] && git clone --depth 1 https://github.com/derselbst/lazyusf2.git
+    # derselbst/lazyusf2 HEAD has a DebugMessage signature that doesn't
+    # match r4300/new_dynarec. Use the jprjr fork, which stays closer
+    # to the original kode54 lazyusf2 API used inside the tree.
+    [ ! -d "lazyusf2" ] && git clone --depth 1 https://github.com/jprjr/lazyusf2.git
     {
-        cd lazyusf2 && mkdir -p build && cd build
-        cmake .. -DCMAKE_C_FLAGS="$CF" -DCMAKE_INSTALL_PREFIX=$PREFIX \
-            -DBUILD_SHARED_LIBS=OFF && make -j$NPROC && make install
-        if [ ! -f "$PREFIX/lib/liblazyusf.a" ]; then
-            echo "--- cmake failed, trying manual build ---"
-            cd $LIBS/lazyusf2
-            find . -name "*.c" -not -path "./build/*" | while read f; do
-                gcc -c $CF -I. -Ir4300 -Iusf -I$PREFIX/include "$f" -o "${f%.c}.o" || true
-            done
-            find . -name "*.o" -not -path "./build/*" | xargs ar rcs $PREFIX/lib/liblazyusf.a || true
-            mkdir -p $PREFIX/include/lazyusf
-            find . -name "usf.h" -exec cp {} $PREFIX/include/lazyusf/ \;
-        fi
+        cd lazyusf2
+        LAZYUSF_CF="$CF -DARM -DUSE_EXPANSION_PAK -Wno-error -Wno-int-conversion -Wno-implicit-function-declaration -Wno-incompatible-pointer-types"
+        # rsp_lle/bench.c tests the built lib and isn't needed here.
+        find . -name "*.c" -not -name "bench.c" -not -path "./build/*" | while read f; do
+            gcc -c $LAZYUSF_CF -I. -Ir4300 -Iusf -Irsp_lle -I$PREFIX/include "$f" -o "${f%.c}.o" || true
+        done
+        find . -name "*.o" -not -path "./build/*" | xargs ar rcs $PREFIX/lib/liblazyusf.a || true
+        mkdir -p $PREFIX/include/lazyusf
+        find . -maxdepth 2 -name "usf.h" -exec cp {} $PREFIX/include/lazyusf/ \;
     } > $LOGS/lazyusf.log 2>&1
 fi
 [ -f "$PREFIX/lib/liblazyusf.a" ] && echo "    OK" || { echo "    FAIL — tail of log:"; tail -30 $LOGS/lazyusf.log; }
@@ -202,15 +261,20 @@ fi
 echo ">>> [11/15] Building lazygsf (GBA GSF)..."
 cd $LIBS
 if [ ! -f "$PREFIX/lib/liblazygsf.a" ]; then
+    # lazygsf wraps mGBA's sound core; it needs mGBA's public headers
+    # on the include path (mgba/core/core.h etc). Clone mGBA next to
+    # lazygsf and point at its include directory.
+    [ ! -d "mgba" ] && git clone --depth 1 https://github.com/mgba-emu/mgba.git
     [ ! -d "lazygsf" ] && git clone --depth 1 https://github.com/jprjr/lazygsf.git
     cd lazygsf
     {
+        LG_CF="$CF -I$LIBS/mgba/include -I$LIBS/mgba/src -I. -I$PREFIX/include -DLAZYGSF_STATIC -DDISABLE_THREADING -Wno-error"
         find . -name "*.c" -o -name "*.cpp" | while read f; do
             OBJ="${f%.*}.o"
             if [[ "$f" == *.cpp ]]; then
-                g++ -c $CF -I. -I$PREFIX/include "$f" -o "$OBJ" || true
+                g++ -c $LG_CF "$f" -o "$OBJ" || true
             else
-                gcc -c $CF -I. -I$PREFIX/include "$f" -o "$OBJ" || true
+                gcc -c $LG_CF "$f" -o "$OBJ" || true
             fi
         done
         find . -name "*.o" | xargs ar rcs $PREFIX/lib/liblazygsf.a || true
@@ -227,16 +291,29 @@ if [ ! -f "$PREFIX/lib/libadplug.a" ]; then
     [ ! -d "libbinio" ] && git clone --depth 1 https://github.com/adplug/libbinio.git
     [ ! -d "adplug" ] && git clone --depth 1 https://github.com/adplug/adplug.git
     {
+        # libbinio must succeed first; pkg-config discovery is how
+        # adplug's configure finds it.
         cd $LIBS/libbinio
         autoreconf -vfi
         CXXFLAGS="$CF" ./configure --prefix=$PREFIX --enable-static --disable-shared
-        make -j$NPROC && make install
+        make -j$NPROC
+        make install
+
+        if [ ! -f "$PREFIX/lib/pkgconfig/libbinio.pc" ]; then
+            echo "ERROR: libbinio.pc not installed; adplug configure will fail"
+            exit 42
+        fi
+
         cd $LIBS/adplug
         autoreconf -vfi
         PKG_CONFIG_PATH=$PREFIX/lib/pkgconfig \
+        libbinio_CFLAGS="-I$PREFIX/include" \
+        libbinio_LIBS="-L$PREFIX/lib -lbinio" \
         CXXFLAGS="$CF -I$PREFIX/include" LDFLAGS="-L$PREFIX/lib" \
-            ./configure --prefix=$PREFIX --enable-static --disable-shared
-        make -j$NPROC && make install
+            ./configure --prefix=$PREFIX --enable-static --disable-shared \
+            --without-adplay
+        make -j$NPROC
+        make install
     } > $LOGS/adplug.log 2>&1
 fi
 [ -f "$PREFIX/lib/libadplug.a" ] && echo "    OK" || { echo "    FAIL — tail of log:"; tail -30 $LOGS/adplug.log; }
@@ -276,13 +353,25 @@ fi
 echo ">>> [15/15] Building WonderSwan sound core (WSR)..."
 cd $LIBS
 if [ ! -f "$PREFIX/lib/libwswan.a" ]; then
+    # Needs libretro-common for boolean.h, retro_inline.h, etc.
+    [ ! -d "libretro-common" ] && \
+        git clone --depth 1 https://github.com/libretro/libretro-common.git
     [ ! -d "beetle-wswan-libretro" ] && \
         git clone --depth 1 https://github.com/libretro/beetle-wswan-libretro.git
     cd beetle-wswan-libretro
     {
+        WSWAN_CF="$CF -I. -Imednafen -Imednafen/wswan -Imednafen/hw_cpu \
+            -Imednafen/hw_sound -Imednafen/include \
+            -I$LIBS/libretro-common/include \
+            -DLSB_FIRST -DWANT_NEW_API -DSTDC_HEADERS=1 -DWANT_STEREO_SOUND \
+            -Wno-error -Wno-narrowing -fpermissive"
         find mednafen/wswan -name "*.cpp" -o -name "*.c" | while read f; do
             OBJ="${f%.*}.o"
-            g++ -c $CF -I. -Imednafen -Imednafen/wswan "$f" -o "$OBJ" || true
+            if [[ "$f" == *.cpp ]]; then
+                g++ -c $WSWAN_CF "$f" -o "$OBJ" || true
+            else
+                gcc -c $WSWAN_CF "$f" -o "$OBJ" || true
+            fi
         done
         find mednafen -name "*.o" | xargs ar rcs $PREFIX/lib/libwswan.a || true
         mkdir -p $PREFIX/include/wswan
