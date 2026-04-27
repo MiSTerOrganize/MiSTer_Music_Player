@@ -49,7 +49,7 @@ Each system gets its own music player RBF with FPGA-native audio output (I2S, SP
 
 1. Copy `Install_Music_Player.sh` to `/media/fat/Scripts/` on your MiSTer SD card
 2. Run it from MiSTer menu → Scripts → Install_Music_Player
-3. It downloads everything automatically: ARM binary, all 27 RBFs, and docs
+3. It downloads the ARM binary + all 27 RBFs automatically
 4. Add music files to `/media/fat/games/Music_Player/`
 5. In MiSTer menu, navigate to _Multimedia → _Music → pick a system
 
